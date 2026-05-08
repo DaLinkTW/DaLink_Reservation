@@ -1,0 +1,1109 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>大林聯合建築師事務所 公司資源預約管理系統 V2.0</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap');
+
+        body { font-family: 'Noto Sans TC', sans-serif; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        /* 自定義 Slider 樣式 */
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 18px;
+            height: 18px;
+            background: #2563eb;
+            cursor: pointer;
+            border-radius: 50%;
+            border: 2px solid white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useMemo, useEffect, useCallback } = React;
+
+        // ============================================================
+        // 1. 系統常數設定 (System Configuration)
+        // ============================================================
+        const CURRENT_VERSION = "V2.0";
+        // Google Apps Script 部署網址 (後端 API)
+        const SCRIPT_URLS = {
+            room: "https://script.google.com/macros/s/AKfycbwnvbW-uxGV12R36TjL6I6732P4sKNBngUPq-8zhM38ohD_NYy44Tz4Bc5KJVgf0vUm/exec", // 請填入「會議室」的 GAS URL
+            equipment: "https://script.google.com/macros/s/AKfycby1K8Y1hNP5keniXUGDS-CHQvczXCIxJQP2QLoRgBKdXLKf4ZSbIWlAZpandswIUzDTyw/exec", // 請填入「會議設備」的 GAS URL
+			car: "https://script.google.com/macros/s/AKfycby58c0xn5d-J68jd_7mMjkHTvGbRDpI1_p8qbr6YI4-uNhNvNTaczq-wuLLcos6TAYw/exec", // 請填入「公務車」的 GAS URL
+            easycard: "https://script.google.com/macros/s/AKfycbz2DKa-ZooLkFC-9y7bKh1zbbHCrUUeB0SF58CRYdjsPzOsu2JV2XqSN1OJ7P21Od3w/exec"   // 請填入「悠遊卡」的 GAS URL
+        };		  
+		
+        const ADMIN_PASSWORD = "admin0408"; 
+
+        // 系統更新日誌內容
+        const VERSION_LOGS = [
+            { 
+                version: "V2.0", 
+                date: "2026-05-11", 
+                features: ["新增公務車、會議設備、悠遊卡預約功能","管理者名單及項目異動"] 
+            },
+			{ 
+                version: "V1.4.1", 
+                date: "2026-05-04", 
+                features: ["管理者名單異動"] 
+            },		
+            { 			  
+                version: "V1.4", 
+                date: "2026-04-21", 
+                features: ["優化UI設計", "新增同步至Google日曆功能（反向僅有刪除功能，每5分鐘自動偵測）"] 
+            },
+            { 
+                version: "V1.3", 
+                date: "2026-04-10", 
+                features: ["新增系統更新日誌","新增週期性預約功能(每天/每週/每月)", "新增「日/月」切換導覽按鈕"] 
+            }
+        ];
+
+        // 資源類別定義與對應圖示
+        const CATEGORIES = [
+            { id: 'room', label: '會議室', icon: 'calendar' },
+            { id: 'equipment', label: '會議設備', icon: 'monitor' },
+            { id: 'car', label: '公務車', icon: 'car' },
+            { id: 'easycard', label: '公務悠遊卡', icon: 'credit-card' }																															   																																					 
+        ];
+		
+		// 資源類別定義與對應注意事項
+		const CATEGORY_NOTES = {
+			room: "注意事項：如需異動或取消已登記預約，請聯繫 9F/7F 各樓層管理者協助處理。",
+			equipment: "注意事項：設備借用請愛惜使用，歸還時請確認配件（線材、滑鼠等）是否齊全。",
+			car: "注意事項：用車完畢請務必歸還鑰匙給劉姐，如有違規罰單由借用人負責。",
+			easycard: "注意事項：使用完畢請務必歸還給劉姐，遺失請立即通知及掛失。"
+		};
+
+        // 各類別資源清單設定 (可自行擴充/修改)
+        const RESOURCES = {
+            room: [
+                { id: 'room-a', name: '會議室 901 (中型 10-15人)', color: 'bg-rose-50 border-rose-200 text-rose-700', dot: 'bg-rose-500' },
+                { id: 'room-b', name: '會議室 902 (大型 10-20人)', color: 'bg-amber-50 border-amber-200 text-amber-700', dot: 'bg-amber-500' },
+                { id: 'room-c', name: '會議室 701 (中型 10-15人)─暫無設備', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' },
+                { id: 'room-d', name: '會議室 702 (大型 10-20人)', color: 'bg-emerald-50 border-emerald-200 text-emerald-700', dot: 'bg-emerald-500' },
+                { id: 'room-e', name: '會議室 703 (暫不開放)', color: 'bg-slate-100 border-slate-200 text-slate-400', dot: 'bg-slate-400' },
+                { id: 'room-f', name: '會議室 704 (小型 6-8人)─暫無設備', color: 'bg-violet-50 border-violet-200 text-violet-700', dot: 'bg-violet-500' }
+            ],
+			equipment: [
+                { id: 'eq-a', name: '筆電Dell（藍）─含HDMI線、滑鼠、電源線', color: 'bg-rose-50 border-rose-200 text-rose-700', dot: 'bg-rose-500' },
+                { id: 'eq-b', name: '筆電Dell（銀）─含滑鼠、電源線', color: 'bg-amber-50 border-amber-200 text-amber-700', dot: 'bg-amber-500' },
+                { id: 'eq-c', name: '筆電Genuine（黑）─含無線滑鼠（注意USB）、電源線', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' },
+				{ id: 'eq-d', name: '筆電ASUS（黑）─工地長期借用', color: 'bg-slate-100 border-slate-200 text-slate-400', dot: 'bg-slate-400' },
+				{ id: 'eq-e', name: '投影機（銀）─含HDMI線、遙控器、三轉二接頭', color: 'bg-emerald-50 border-emerald-200 text-emerald-700', dot: 'bg-emerald-500' },
+				{ id: 'eq-f', name: '投影機（金）─含HDMI線、遙控器、三轉二接頭', color: 'bg-violet-50 border-violet-200 text-violet-700', dot: 'bg-violet-500' },
+				{ id: 'eq-g', name: '簡報筆', color: 'bg-purple-50 border-purple-200 text-purple-700', dot: 'bg-purple-500' },
+				{ id: 'eq-h', name: '延長線', color: 'bg-fuchsia-50 border-fuchsia-200 text-fuchsia-700', dot: 'bg-fuchsia-500' },
+				{ id: 'eq-i', name: '耳機轉接頭A', color: 'bg-pink-50 border-pink-200 text-pink-700', dot: 'bg-pink-500' },
+				{ id: 'eq-j', name: '耳機轉接頭B', color: 'bg-teal-50 border-teal-200 text-teal-700', dot: 'bg-teal-500' },
+            ],
+            car: [
+                { id: 'car-a', name: '公務車 A (RFG-2000)', color: 'bg-rose-50 border-rose-200 text-rose-700', dot: 'bg-rose-500' }
+            ],
+            easycard: [
+                { id: 'card-a', name: '公務悠遊卡 01', color: 'bg-rose-50 border-rose-200 text-rose-700', dot: 'bg-rose-500' },
+                { id: 'card-b', name: '公務悠遊卡 02', color: 'bg-amber-50 border-eamber-200 text-amber-700', dot: 'bg-amber-500' },
+                { id: 'card-c', name: '公務悠遊卡 03', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' },
+				{ id: 'card-d', name: '公務悠遊卡 04', color: 'bg-emerald-50 border-emerald-200 text-emerald-700', dot: 'bg-emerald-500' },
+                { id: 'card-e', name: '公務悠遊卡 05', color: 'bg-violet-50 border-lviolet-200 text-violet-700', dot: 'bg-violet-500' }
+            ]
+        };																																	 																												  			  	  
+        // 生成時間下拉選單 (08:00 - 20:30)
+        const generateTimeOptions = () => {
+            const options = [];
+            for (let hour = 8; hour <= 20; hour++) {
+                const hh = String(hour).padStart(2, '0');
+                options.push(`${hh}:00`, `${hh}:30`);
+            }
+            return options;
+        };
+        const TIME_OPTIONS = generateTimeOptions();
+					
+		// Google Calendar 個案分類選單
+		const PROJECTS_DATA = {
+			"2025": [
+				{ id: "25003", name: "臺北市萬華福興社會住宅2區" },
+				{ id: "25012", name: "新北市新莊塭仔圳社會住宅" },
+				{ id: "25024", name: "桃園市大溪埔頂社會住宅" },
+				{ id: "25034", name: "桃園市中壢中運段社會住宅" }
+			],			
+			"2024": [
+				{ id: "24009", name: "臺北市內湖石壁潭社會住宅" },
+				{ id: "24014", name: "新北市土城、三重青年社會住宅" },
+				{ id: "24030", name: "桃園市中壢內壢段社會住宅" },
+				{ id: "24032", name: "松山國際機場T1航廈補強裝修及設施更新工程" }
+			],
+			"2023": [
+				{ id: "23001", name: "新北市蘆洲光華段青年社會住宅" },
+				{ id: "23002", name: "桃園市埔心、過嶺社會住宅" },
+				{ id: "23012", name: "臺北市凌霄好室社會住宅" },				
+				{ id: "23016", name: "台康生技橋頭科技園區" },
+				{ id: "23018", name: "新北市德穗安居社會住宅" },
+				{ id: "23021", name: "禾聯A7廠辦新建工程" },
+				{ id: "23022", name: "臺北市社子島地區區段徵收" }
+			],
+			"2022": [
+				{ id: "22003", name: "高雄國際機場新航廈工程" },
+				{ id: "22004", name: "富邦承德廠辦" },
+				{ id: "22005", name: "新北市板橋國民第二運動中心" },
+				{ id: "22009", name: "新北市汐止、中和社會住宅" },
+				{ id: "22011", name: "桃園市中壢、龍潭社會住宅" },
+				{ id: "22013", name: "慈濟中壢園區" },
+				{ id: "22019", name: "新北市三重果菜市場案" },
+				{ id: "22030", name: "中國人壽敦北大樓旅館" },
+				{ id: "22031", name: "國衛院高齡醫學研究中心" }			
+			],
+			"2021": [
+				{ id: "21003", name: "疾病管制署實驗室臨時辦公及建置工程" },
+				{ id: "21005", name: "新北市板橋光環段社會住宅" },
+				{ id: "21007", name: "慈濟岡山醫療園區" },
+				{ id: "21015", name: "臺北市南港僑泰興社會住宅" }
+			],
+			"2020": [
+				{ id: "20002", name: "新北市三峽國光社會住宅" },
+				{ id: "20007", name: "臺北市內湖東湖社會住宅" },
+				{ id: "20028", name: "桃園市慈文社會住宅" },
+				{ id: "20029", name: "臺北捷運劍潭站TOD" }
+			],
+			"2019": [
+				{ id: "19018", name: "法務部調查局中和調查園區" },
+				{ id: "19035", name: "新北市新北高工地下停車場" }
+			],
+			"2018": [
+				{ id: "18006", name: "臺北市北投福國社會住宅" },
+				{ id: "18027", name: "高雄捷運凹子底站商業區開發" }
+			],
+			"2017": [
+				{ id: "17010", name: "新北市一新二土社會住宅" },
+				{ id: "17018", name: "臺北市六張犁A、B基地社會住宅" },
+				{ id: "17019", name: "台師大華語國際學舍" },
+				{ id: "17020", name: "中華郵政物流園區" }
+			],
+			"Others": [
+				{ id: "Others001", name: "公司競圖案" },
+				{ id: "Others002", name: "專案管理部" }
+			]
+		};
+		const YEARS = Array.from({length: new Date().getFullYear() - 2016 + 1}, (_, i) => (2016 + i).toString()).reverse();
+
+        // ============================================================
+        // 2. 工具函式 (Utility Functions)
+        // ============================================================
+        
+        // 日期格式化 YYYY-MM-DD
+        const formatDate = (date) => {
+            const d = new Date(date);
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        };
+
+        // 時間格式化處理 (處理從 Sheets 來的不同日期/時間格式)
+        const formatTime = (input) => {
+            if (!input) return "00:00";
+            const str = String(input);
+            if (str.includes('T')) { // 處理 ISO 格式
+                const date = new Date(input);
+                return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+            }
+            return str;
+        };
+
+        // 圖示組件 (SVG Icons)
+        const Icon = ({ name, size = 18, className = "", isCustom = false }) => {
+            if (isCustom) {
+                return (
+                    <div className={`flex items-center justify-center rounded-lg p-2 ${className}`} style={{ width: size * 2.2, height: size * 2.2 }}>
+                        {/* 將下方的 src 替換為您公司的 LOGO 圖片網址 */}
+                         <img 
+                         src="https://lh3.google.com/u/0/d/1qc-oaNh8kQVx2FrBkUtnd0NTda6ScIDT=w1920-h953-iv2" 
+                         alt="Logo" 
+                         className="w-full h-full object-contain"
+                         onError={(e) => { e.target.src = 'https://via.placeholder.com/40?text=LOGO'; }} 
+                        />
+                    </div>
+                );
+            }
+            const icons = {
+                calendar: <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />,
+                car: <React.Fragment><path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2"/><circle cx="7" cy="17" r="2"/><path d="M9 17h6"/><circle cx="17" cy="17" r="2"/></React.Fragment>,
+                monitor: <React.Fragment><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></React.Fragment>,
+                "credit-card": <React.Fragment><rect width="22" height="14" x="1" y="5" rx="2"/><line x1="1" x2="23" y1="10" y2="10"/></React.Fragment>,																																																																															 																																													 																																						
+                cloud: <path d="M17.5 19c3.037 0 5.5-2.463 5.5-5.5 0-2.97-2.354-5.402-5.304-5.494A7 7 0 1 0 5 13.045c0 .015 0 .03.001.045C2.181 13.528 0 15.937 0 18.889c0 3.037 2.463 5.5 5.5 5.5h12z" />,
+                "chevron-left": <polyline points="15 18 9 12 15 6" />,
+                "chevron-right": <polyline points="9 18 15 12 9 6" />,
+                x: <React.Fragment><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></React.Fragment>,
+                "loader-2": <path d="M21 12a9 9 0 1 1-6.219-8.56" />,
+                lock: <React.Fragment><rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></React.Fragment>,
+                unlock: <React.Fragment><rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 9.9-1" /></React.Fragment>,
+                edit: <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />,
+                info: <React.Fragment><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></React.Fragment>,
+                refresh: <React.Fragment><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></React.Fragment>
+            };
+            return (
+                <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`${className} ${name === 'loader-2' ? 'animate-spin' : ''}`}>
+                    {icons[name] || null}
+                </svg>
+            );
+        };
+
+        // ============================================================
+        // 3. 主程式邏輯 (Main App Component)
+        // ============================================================
+        function App() {
+            // --- 狀態定義 (State) ---
+            const [activeCategory, setActiveCategory] = useState('room'); // 當前頁籤			
+            const [viewMode, setViewMode] = useState('daily'); // 顯示模式：daily (日), monthly (月)														   
+            const [selectedDate, setSelectedDate] = useState(formatDate(new Date())); // 目前選取的日期
+            const [bookings, setBookings] = useState([]); // 全部的預約資料
+            const [isLoading, setIsLoading] = useState(false); // 送出表單中的讀取狀態
+            const [isSyncing, setIsSyncing] = useState(false); // 與後端同步中的狀態
+            const [notification, setNotification] = useState(null); // 通知訊息
+            const [isAdmin, setIsAdmin] = useState(false); // 是否為管理者模式
+            const [editingBooking, setEditingBooking] = useState(null); // 當前正在編輯的預約資料
+			const [resourceStatuses, setResourceStatuses] = useState({}); // 紀錄實體資源借用狀態
+
+            // 預約表單狀態
+            const [formData, setFormData] = useState({
+                resourceId: RESOURCES['room'][0].id,
+                date: formatDate(new Date()),
+                startTime: '09:00',
+                endTime: '10:00',
+                title: '',
+                user: '',
+                repeatType: 'none', // 週期類型：none, daily, weekly, monthly
+                repeatCount: 1,      // 重複次數
+				syncCalendar: false, // 預設不同步
+				syncYear: new Date().getFullYear().toString(), // 預設當年
+				syncProjectId: '' // 案名ID
+            });
+
+            // --- 通知處理 ---
+            const showNotification = useCallback((message, type = 'success') => {
+                setNotification({ message, type });
+                setTimeout(() => setNotification(null), 4000);
+            }, []);
+						   
+            // 切換頁籤
+            const handleCategoryChange = (categoryId) => {
+                if (activeCategory === categoryId) return;
+                setActiveCategory(categoryId);
+                setBookings([]); // 清空舊資料顯示讀取中
+                setFormData(prev => ({
+                    ...prev,
+                    resourceId: RESOURCES[categoryId][0].id,
+                    title: '',
+                    user: ''
+                }));
+            };
+
+            // ============================================================
+            // 4. API 通訊 (Data Synchronization)
+            // ============================================================
+            const currentScriptUrl = SCRIPT_URLS[activeCategory]; // 從 Google Sheets 抓取資料
+
+            const fetchBookings = async () => {
+                if (!currentScriptUrl) {
+                    setIsSyncing(false);
+                    return; // 如果還沒設定 URL，則不抓取
+                }
+                setIsSyncing(true);
+                try {
+                    const response = await fetch(currentScriptUrl);
+                    const rawData = await response.json();
+                    
+                    // 資料標準化，相容原有 roomId 與新的 resourceId
+                    const normalizedData = rawData.map(item => ({
+                        id: String(item.id || item['編號'] || Math.random()),
+                        resourceId: item.resourceId || item.roomId || item['會議室'] || item['資源'] || RESOURCES[activeCategory][0].id,
+                        date: formatDate(item.date || item['日期']),
+                        startTime: formatTime(item.startTime || item['開始時間']),
+                        endTime: formatTime(item.endTime || item['結束時間']),
+                        title: item.title || item['主題'] || '無標題',
+                        user: item.user || item['預約者'] || '未知'
+                    }));
+                    setBookings(normalizedData);
+                } catch (error) {
+                    showNotification("資料同步失敗，請檢查網路連線", "error");
+                } finally {
+                    setIsSyncing(false);
+                }
+            };
+
+            // 初始化與自動重新整理
+            useEffect(() => {
+                fetchBookings();
+                const interval = setInterval(fetchBookings, 60000); // 每分鐘自動更新
+                return () => clearInterval(interval);
+            }, [activeCategory]); // 當頁籤切換時重新抓取
+
+            // 同步目前資源借還狀態	
+			useEffect(() => {
+				const fetchStatus = async () => {
+					if (!currentScriptUrl) return; // 確保有網址才執行
+					try {
+						// 修正1：將未定義的 API_URL 改為 currentScriptUrl
+						const response = await fetch(`${currentScriptUrl}?type=status`);
+						const data = await response.json();
+						// 修正2：補上 's'，改為正確的 setResourceStatuses
+						setResourceStatuses(data); 
+					} catch (error) {
+						console.error("無法同步資源狀態:", error);
+					}
+				};
+				fetchStatus();
+			}, [currentScriptUrl]); // 修正3：加入依賴陣列
+						
+            // ============================================================
+            // 5. 事件處理邏輯 (Event Handlers)
+            // ============================================================
+
+            // 切換導覽日期
+            const navigateDate = (direction) => {
+                const d = new Date(selectedDate);
+                if (viewMode === 'daily') d.setDate(d.getDate() + direction);
+                else { d.setMonth(d.getMonth() + direction); d.setDate(1); }
+                setSelectedDate(formatDate(d));
+            };
+
+            const goToCurrent = () => setSelectedDate(formatDate(new Date()));
+
+            // 管理者登入邏輯
+            const toggleAdmin = () => {
+                if (isAdmin) {
+                    setIsAdmin(false);
+                    showNotification("已登出管理者模式");
+                } else {
+                    const pwd = prompt("請輸入管理者密碼：");
+                    if (pwd === ADMIN_PASSWORD) {
+                        setIsAdmin(true);
+                        showNotification("已進入管理者模式");
+                    } else if (pwd !== null) {
+                        showNotification("密碼錯誤", "error");
+                    }
+                }
+            };
+
+            // 衝突檢測邏輯：判斷同一會議室同一天，時間是否有重疊
+            const checkConflict = (targetBooking, excludeId = null) => {
+                const start = targetBooking.startTime;
+                const end = targetBooking.endTime;
+                const conflicts = bookings.filter(b => 
+                    b.id !== excludeId &&
+                    b.date === targetBooking.date && 
+                    b.resourceId === targetBooking.resourceId &&
+                    start < b.endTime && end > b.startTime
+                );
+                return conflicts.length > 0 ? conflicts[0] : null;
+            };
+
+            // 時間選擇邏輯優化：確保結束時間永遠大於開始時間
+            const handleStartTimeChange = (newStartTime, isEdit = false) => {
+                const target = isEdit ? editingBooking : formData;
+                const setter = isEdit ? setEditingBooking : setFormData;
+                let newEndTime = target.endTime;
+                const startIdx = TIME_OPTIONS.indexOf(newStartTime);
+                const endIdx = TIME_OPTIONS.indexOf(target.endTime);
+                
+                if (startIdx >= endIdx) {
+                    // 自動設定結束時間為開始時間後 1 小時 (2格)
+                    newEndTime = TIME_OPTIONS[startIdx + 2] || TIME_OPTIONS[startIdx + 1] || newStartTime;
+                }
+                setter({ ...target, startTime: newStartTime, endTime: newEndTime });
+            };
+
+            const handleEndTimeChange = (newEndTime, isEdit = false) => {
+                const target = isEdit ? editingBooking : formData;
+                const setter = isEdit ? setEditingBooking : setFormData;
+                if (newEndTime <= target.startTime) {
+                    showNotification("結束時間必須晚於開始時間", "error");
+                    const idx = TIME_OPTIONS.indexOf(target.startTime);
+                    newEndTime = TIME_OPTIONS[idx + 2] || TIME_OPTIONS[idx + 1] || target.startTime;
+                }
+                setter({ ...target, endTime: newEndTime });
+            };
+
+            // 送出新預約 (包含週期性處理)
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                if(!currentScriptUrl) return showNotification("尚未設定此項目的 GAS 網址", "error");
+                const { title, user, repeatType, repeatCount, date, startTime, endTime, syncCalendar, syncProjectId } = formData;
+                const trimmedTitle = title.trim();
+                const trimmedUser = user.trim();
+
+                if (!trimmedTitle || !trimmedUser) return showNotification("請填寫主題與預約者", "error");
+                if (startTime >= endTime) return showNotification("結束時間必須大於開始時間", "error");
+
+                // 計算所有需要預約的日期
+                const bookingDates = [];
+                let current = new Date(date);
+                const count = repeatType === 'none' ? 1 : repeatCount;
+                
+                for (let i = 0; i < count; i++) {
+                    bookingDates.push(formatDate(current));
+                    if (repeatType === 'daily') current.setDate(current.getDate() + 1);
+                    else if (repeatType === 'weekly') current.setDate(current.getDate() + 7);
+                    else if (repeatType === 'monthly') current.setMonth(current.getMonth() + 1);
+                }
+
+                // 批次檢核衝突
+                const newBookingsToSubmit = [];
+                for (const d of bookingDates) {
+                    const tempBooking = { 
+					...formData, 
+					date: d, 
+					title: trimmedTitle, 
+					user: trimmedUser, 
+					syncCalendar: syncCalendar, // 傳送同步標記
+                    roomId: formData.resourceId, // 保持向後相容舊 GAS
+					id: `${Date.now()}-${Math.random()}` };
+                    const conflict = checkConflict(tempBooking);
+                    if (conflict) return showNotification(`日期 ${d} 時段衝突：[${conflict.startTime}-${conflict.endTime}] ${conflict.title}`, "error");
+                    newBookingsToSubmit.push(tempBooking);
+                }
+
+                setIsLoading(true);
+                try {
+                    // 迴圈送出請求至 GAS (Action: add)
+                    for (const b of newBookingsToSubmit) {
+                        await fetch(currentScriptUrl, { 
+                            method: 'POST', 
+                            mode: 'no-cors',
+                            body: JSON.stringify({ action: 'add', data: b }) 
+                        });
+                    }
+                    showNotification(`預約成功！共 ${newBookingsToSubmit.length} 筆`);
+                    setTimeout(fetchBookings, 1000);
+                    setFormData(prev => ({ ...prev, title: '', user: '', repeatType: 'none', repeatCount: 1 }));
+                } catch (error) { 
+                    showNotification('連線失敗', 'error'); 
+                } finally { 
+                    setIsLoading(false); 
+                }
+            };
+
+            // 更新既有預約 (刪除舊的 + 新增新的)
+            const handleUpdate = async () => {
+                if (!editingBooking) return;
+                const trimmedTitle = editingBooking.title.trim();
+                const trimmedUser = editingBooking.user.trim();
+                if (!trimmedTitle || !trimmedUser) return showNotification("欄位不可為空", "error");
+                if (editingBooking.startTime >= editingBooking.endTime) return showNotification("結束時間必須大於開始時間", "error");
+                const conflict = checkConflict(editingBooking, editingBooking.id);
+                if (conflict) return showNotification(`修改衝突：[${conflict.startTime}-${conflict.endTime}] ${conflict.title}`, "error");
+
+                // 保持向後相容
+                const payload = { ...editingBooking, roomId: editingBooking.resourceId };
+
+                setIsLoading(true);
+                try {
+                    // 先刪後加，確保 Sheets 中 ID 維持一致且資料更新
+                    await fetch(currentScriptUrl, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ action: 'delete', id: String(editingBooking.id) }) });
+                    await fetch(currentScriptUrl, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ action: 'add', data: payload }) });
+                    showNotification('資料已修改');
+                    setEditingBooking(null);
+                    setTimeout(fetchBookings, 1000);
+                } catch (error) { showNotification('更新失敗', 'error'); } finally { setIsLoading(false); }
+            };
+
+            // 刪除預約 (僅限管理者)
+            const handleDelete = async (id) => {
+                if (!isAdmin) return;
+                if (!confirm("確定要刪除這筆預約嗎？")) return;
+                setIsSyncing(true);
+                try {
+                    await fetch(currentScriptUrl, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ action: 'delete', id: String(id) }) });
+                    setTimeout(fetchBookings, 1000);
+                    showNotification('已刪除');
+                } catch (error) { showNotification('刪除失敗', 'error'); setIsSyncing(false); }
+            };
+			
+			// 切換實體資源借用狀態
+			const toggleResourceStatus = async (resId) => {
+				if (!isAdmin) {
+					showNotification("權限不足：僅限管理者可切換借出/歸還狀態", "error");
+					return;
+				}
+
+				// 判斷新的狀態是什麼
+				const currentStatus = resourceStatuses[resId];
+				const newStatus = currentStatus === 'borrowed' ? 'available' : 'borrowed';
+
+				// 先更新前端畫面，讓使用者感覺操作順暢
+				setResourceStatuses(prev => ({
+					...prev,
+					[resId]: newStatus
+				}));
+
+				// 修正核心：將新狀態送到後端 GAS 儲存
+				try {
+					await fetch(currentScriptUrl, {
+						method: 'POST',
+						mode: 'no-cors',
+						body: JSON.stringify({ 
+							action: 'updateStatus', 
+							data: { 
+								resourceId: resId, 
+								status: newStatus 
+							} 
+						})
+					});
+					showNotification("資源借用狀態已更新至資料庫");
+				} catch (error) {
+					// 如果 API 失敗，將畫面狀態還原
+					setResourceStatuses(prev => ({
+						...prev,
+						[resId]: currentStatus
+					}));
+					showNotification("同步至資料庫失敗，請檢查網路", "error");
+				}
+			};
+	
+            // ============================================================
+            // 6. 介面渲染 (View Rendering)
+            // ============================================================
+
+            // 計算目前選取日期的預約
+            const todaysBookings = useMemo(() => {
+                return bookings.filter(b => b.date === selectedDate).sort((a, b) => a.startTime.localeCompare(b.startTime));
+            }, [bookings, selectedDate]);
+
+            // 渲染月曆核心組件
+            const renderMonthCalendar = () => {
+                const baseDate = new Date(selectedDate);
+                const year = baseDate.getFullYear();
+                const month = baseDate.getMonth();
+                const daysInMonth = new Date(year, month + 1, 0).getDate();
+                const firstDay = new Date(year, month, 1).getDay();
+                
+                const days = [];
+                // 補齊月初空白
+                for (let i = 0; i < firstDay; i++) {
+                    days.push({ day: null, dateStr: null });
+                }
+                // 填充當月日期
+                for (let d = 1; d <= daysInMonth; d++) {
+                    const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                    days.push({ day: d, dateStr });
+                }
+
+                return (
+                    <div className="grid grid-cols-7 gap-px bg-slate-200 border rounded-xl overflow-hidden shadow-inner">
+                        {['日','一','二','三','四','五','六'].map(d => (
+                            <div key={d} className="bg-slate-50 py-3 text-center font-bold text-slate-400 text-xs uppercase tracking-wider">{d}</div>
+                        ))}
+                        {days.map((item, i) => {
+                            const isToday = item.dateStr === formatDate(new Date());
+                            const isSelected = item.dateStr === selectedDate;
+                            const dayBookings = item.dateStr ? bookings.filter(b => b.date === item.dateStr).sort((a,b) => a.startTime.localeCompare(b.startTime)) : [];
+                            
+                            return (
+                                <div 
+                                    key={i} 
+                                    onClick={() => {
+                                        if (item.dateStr) {
+                                            setSelectedDate(item.dateStr);
+                                            setViewMode('daily');
+                                        }
+                                    }}
+                                    className={`bg-white min-h-[100px] md:min-h-[120px] p-2 border-t border-r border-slate-100 relative transition-all cursor-pointer hover:bg-blue-50 group flex flex-col ${!item.day ? 'bg-slate-50/50' : ''}`}
+                                >
+                                    {item.day && (
+                                        <>
+                                            <span className={`text-xs font-bold w-7 h-7 flex items-center justify-center rounded-full shrink-0 transition-colors ${isToday ? 'bg-blue-600 text-white shadow-md' : 'text-slate-500 group-hover:text-blue-600'} ${isSelected ? 'ring-2 ring-blue-400 ring-offset-1' : ''}`}>
+                                                {item.day}
+                                            </span>
+                                            <div className="flex-1 w-full overflow-y-auto no-scrollbar space-y-1 mt-2">
+                                                {dayBookings.slice(0, 4).map(b => {
+													const res = RESOURCES[activeCategory].find(r => r.id === b.resourceId);
+													let shortName = '';
+													if (res) {
+														if (activeCategory === 'room') {
+															shortName = res.name.replace(/會議室\s*/, '').split(' ')[0];
+														} else if (activeCategory === 'car') {
+															const match = res.name.match(/\((.*?)\)/);
+															shortName = match ? match[1] : res.name.split(' ')[1];
+														} else if (activeCategory === 'equipment') {
+															shortName = res.name.split('（')[0].split('─')[0];
+														} else if (activeCategory === 'easycard') {
+															shortName = res.name.replace(/公務悠遊卡\s*/, '');
+														}
+													}
+                                                    return (
+                                                        <div key={b.id} className={`text-[10px] leading-tight px-1.5 py-1 rounded shadow-sm border truncate flex items-center gap-1 ${res ? res.color : 'bg-slate-100'}`}>
+                                                            <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${res?.dot || 'bg-slate-400'}`}></div>
+                                                            <span className="font-bold">{shortName}</span> {b.startTime}-{b.endTime}
+                                                        </div>
+                                                    );
+                                                })}
+                                                {dayBookings.length > 4 && (
+                                                    <div className="text-[9px] text-slate-400 text-center font-bold">+ {dayBookings.length - 4} 更多</div>
+                                                )}
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                );
+            };
+
+            const currentDisplayHeader = useMemo(() => {
+                const d = new Date(selectedDate);
+                return viewMode === 'daily' ? selectedDate : `${d.getFullYear()}年 ${d.getMonth() + 1}月`;
+            }, [selectedDate, viewMode]);
+
+            return (
+                <div className="min-h-screen p-4 md:p-8 flex flex-col max-w-7xl mx-auto w-full">
+                    {/* --- 頂部標題區 (Header) --- */}
+                    <header className="mb-8 flex flex-col md:flex-row justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-200 gap-6">
+                        <div className="flex items-center gap-5 w-full md:w-auto">
+                            <Icon name="calendar" size={70} isCustom={true} />
+                            <div>
+                                <h1 className="text-xl md:text-2xl font-black text-slate-800 tracking-tight">大林聯合建築師事務所</h1>
+                                <div className="flex items-center gap-3 mt-1">
+                                    <span className="bg-blue-100 text-blue-700 text-[10px] font-black px-2 py-0.5 rounded uppercase tracking-widest">{CURRENT_VERSION}</span>
+                                    <h2 className="text-slate-500 text-sm md:text-base font-medium">公司資源預約管理系統</h2>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-center gap-4">
+                            {/* 連線狀態指示 */}
+                            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-bold transition-colors ${isSyncing ? 'bg-amber-50 text-amber-600 border-amber-200' : currentScriptUrl ? 'bg-emerald-50 text-emerald-600 border-emerald-200' : 'bg-rose-50 text-rose-600 border-rose-200'}`}>
+                                <Icon name={isSyncing ? "loader-2" : "cloud"} size={14} />
+                                <span>{!currentScriptUrl ? "未設定網址" : isSyncing ? "同步中..." : "雲端連線正常"}</span>
+                            </div>
+                            {/* 管理者登入開關 */}
+                            <button onClick={toggleAdmin} className={`flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm border ${isAdmin ? 'bg-indigo-600 text-white border-indigo-700' : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-400'}`}>
+                                <Icon name={isAdmin ? "unlock" : "lock"} size={14} />
+                                {isAdmin ? "管理者模式" : "管理員登入"}
+                            </button>
+                        </div>
+                    </header>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                        {/* --- 左側欄位：預約表單與公告 (Sidebar) --- */}
+                        <aside className="lg:col-span-4 xl:col-span-3 space-y-6">
+                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+                                <h3 className="text-sm font-black text-slate-800 mb-6 flex items-center gap-2">
+                                    <span className="w-1 h-5 bg-blue-600 rounded-full"></span>
+                                    預約登記表
+                                </h3>
+                                <form onSubmit={handleSubmit} className="space-y-5">
+                                    {/* 資源選擇 (動態切換) */}
+                                    <div className="space-y-1.5">
+                                        <label className="text-[11px] font-black text-slate-400 uppercase ml-1">
+                                            {CATEGORIES.find(c => c.id === activeCategory)?.label}預約選項
+                                        </label>
+                                        <select value={formData.resourceId} onChange={e => setFormData({...formData, resourceId: e.target.value})} className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all">
+                                            {RESOURCES[activeCategory].map(res => <option key={res.id} value={res.id}>{res.name}</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <label className="text-[11px] font-black text-slate-400 uppercase ml-1">預約日期</label>
+                                        <input type="date" value={formData.date} onChange={e => {setFormData({...formData, date: e.target.value}); setSelectedDate(e.target.value);}} className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all" />
+                                    </div>
+                                    {/* 時間區間 */}
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div className="space-y-1.5">
+                                            <label className="text-[11px] font-black text-slate-400 uppercase ml-1">開始時間</label>
+                                            <select value={formData.startTime} onChange={e => handleStartTimeChange(e.target.value)} className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all">
+                                                {TIME_OPTIONS.slice(0, -1).map(time => <option key={time} value={time}>{time}</option>)}
+                                            </select>
+                                        </div>
+                                        <div className="space-y-1.5">
+                                            <label className="text-[11px] font-black text-slate-400 uppercase ml-1">結束時間</label>
+                                            <select value={formData.endTime} onChange={e => handleEndTimeChange(e.target.value)} className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all">
+                                                {TIME_OPTIONS.slice(1).map(time => <option key={time} value={time}>{time}</option>)}
+                                            </select>
+                                        </div>
+                                    </div>
+                                    
+                                    {/* --- 週期功能區區塊 --- */}
+                                    <div className="p-4 bg-blue-50/50 rounded-2xl border border-blue-100 space-y-4">
+                                        <div className="space-y-1.5">
+                                            <label className="text-[11px] font-black text-blue-500 uppercase flex items-center gap-1.5">
+                                                <Icon name="refresh" size={12} /> 重複預約週期
+                                            </label>
+                                            <select value={formData.repeatType} onChange={e => setFormData({...formData, repeatType: e.target.value})} className="w-full rounded-xl border-blue-200 border p-2.5 bg-white text-sm font-bold text-blue-700 outline-none focus:ring-2 focus:ring-blue-500/20 transition-all">
+                                                <option value="none">一次性預約</option>
+                                                <option value="daily">每天重複</option>
+                                                <option value="weekly">每週重複</option>
+                                                <option value="monthly">每月重複</option>
+                                            </select>
+                                        </div>
+                                        {formData.repeatType !== 'none' && (
+                                            <div className="space-y-3 animate-in fade-in slide-in-from-top-2 duration-300">
+                                                <label className="text-[11px] font-black text-blue-500 flex justify-between uppercase">
+                                                    <span>重複次數</span>
+                                                    <span className="bg-blue-600 text-white px-2 py-0.5 rounded text-[10px]">{formData.repeatCount} 次</span>
+                                                </label>
+                                                <input type="range" min="1" max="12" value={formData.repeatCount} onChange={e => setFormData({...formData, repeatCount: parseInt(e.target.value)})} className="w-full h-1.5 bg-blue-200 rounded-lg appearance-none cursor-pointer" />
+                                                <p className="text-[10px] text-blue-400 italic font-medium leading-relaxed">預約範圍將從 {formData.date} 起算連續預約。</p>																																	
+                                            </div>
+                                        )}
+                                    </div>
+
+									{/* --- 同步 Google 日曆功能區 --- */}
+									<div className="p-4 bg-emerald-50/50 rounded-2xl border border-emerald-100 space-y-4 mt-3">
+										<div className="flex items-center justify-between">
+											<label className="text-[11px] font-black text-emerald-600 uppercase flex items-center gap-1.5">
+												<Icon name="calendar" size={12} /> 同步至Google日曆
+											</label>
+											<button 
+												type="button"
+												onClick={() => setFormData({...formData, syncCalendar: !formData.syncCalendar})}
+												className={`w-10 h-5 flex items-center rounded-full p-1 transition-colors ${formData.syncCalendar ? 'bg-emerald-600' : 'bg-slate-300'}`}
+											>
+												<div className={`bg-white w-3 h-3 rounded-full shadow-md transform transition-transform ${formData.syncCalendar ? 'translate-x-5' : 'translate-x-0'}`}></div>
+											</button>
+										</div>
+
+										{formData.syncCalendar && (
+											<div className="space-y-3 animate-in fade-in slide-in-from-top-2 duration-300">
+												{/* 第一層：年份 */}
+												<div className="space-y-1">
+													<label className="text-[10px] font-bold text-emerald-500 ml-1">選擇案號年份</label>
+													<select 
+														value={formData.syncYear} 
+														onChange={e => setFormData({...formData, syncYear: e.target.value, syncProjectId: ''})}
+														className="w-full rounded-xl border-emerald-200 border p-2 bg-white text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all"
+													>
+														{YEARS.map(y => <option key={y} value={y}>{y} 年</option>)}
+													</select>
+												</div>
+												
+												{/* 第二層：案號+案名 */}
+												<div className="space-y-1">
+													<label className="text-[10px] font-bold text-emerald-500 ml-1">案號 + 案名</label>
+													<select 
+														value={formData.syncProjectId} 
+							  
+										 
+																									   
+														onChange={e => setFormData({...formData, syncProjectId: e.target.value})}
+				
+														className="w-full rounded-xl border-emerald-200 border p-2 bg-white text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all"
+													>
+														<option value="">-- 請選擇專案 --</option>
+														{PROJECTS_DATA[formData.syncYear]?.map(p => (
+															<option key={p.id} value={p.id}>{p.id} {p.name}</option>
+														))}
+													</select>
+												</div>
+												<p className="text-[10px] text-emerald-400 font-medium leading-relax px-1 m-0">
+												1.選取後將同步建立至Google日曆。<br/>
+												2.如需增加可同步專案，需先於公司Google帳號建立日曆，再通知系統開發協助處理。
+												</p>
+											</div>
+										)}
+									</div>
+
+                                    <div className="space-y-1.5">
+                                        <label className="text-[11px] font-black text-slate-400 uppercase ml-1">預約事由</label>
+                                        <input type="text" value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all" placeholder="例：專案進度檢討會" />
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <label className="text-[11px] font-black text-slate-400 uppercase ml-1">預約人資訊</label>
+                                        <input type="text" value={formData.user} onChange={e => setFormData({...formData, user: e.target.value})} className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all" placeholder="姓名 + 分機" />
+                                    </div>
+                                    <button 
+                                        type="submit" 
+                                        disabled={isLoading} 
+                                        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-4 rounded-xl shadow-lg shadow-blue-200 transition-all active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2 group"
+                                    >
+                                        {isLoading ? <Icon name="loader-2" size={20} /> : (
+                                            <>
+                                                <span>{formData.repeatType === 'none' ? '立即預約' : `批次預約登記 (${formData.repeatCount}筆)`}</span>
+                                                <Icon name="chevron-right" size={16} className="group-hover:translate-x-1 transition-transform" />
+                                            </>
+                                        )}
+                                    </button>
+                                </form>
+                            </div>
+
+                            {/* --- 更新日誌區 (Logs) --- */}
+                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+                                <div className="flex items-center gap-2 mb-4 text-slate-800 border-b border-slate-50 pb-3">
+                                    <Icon name="info" size={18} className="text-blue-500" />
+                                    <h3 className="text-sm font-black">更新公告</h3>
+                                </div>
+                                <div className="space-y-5 max-h-[200px] overflow-y-auto no-scrollbar">
+                                    {VERSION_LOGS.map((log, idx) => (
+                                        <div key={idx} className="relative pl-5 border-l-2 border-slate-100">
+                                            <div className="absolute -left-[5px] top-0 w-2 h-2 bg-blue-500 rounded-full border-2 border-white"></div>
+                                            <div className="flex items-center gap-2 mb-1.5">
+                                                <span className="text-xs font-black text-blue-600">{log.version}</span>
+                                                <span className="text-[10px] text-slate-400 font-bold">{log.date}</span>
+                                            </div>
+                                            <ul className="text-[11px] text-slate-500 space-y-1.5 font-medium leading-relaxed">
+                                                {log.features.map((f, i) => <li key={i} className="flex gap-1.5"><span>•</span>{f}</li>)}
+                                            </ul>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </aside>
+
+                        {/* --- 右側欄位：預約狀況展示區 (Main Content) --- */}
+                        <main className="lg:col-span-8 xl:col-span-9 flex flex-col"> 
+                            
+                            {/* --- 頁籤導覽區 (Category Tabs) --- */}
+                            <div className="flex space-x-3 mb-6 overflow-x-auto no-scrollbar pb-1">
+                                {CATEGORIES.map(category => (
+                                    <button
+                                        key={category.id}
+                                        onClick={() => handleCategoryChange(category.id)}
+                                        className={`flex items-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm transition-all whitespace-nowrap ${
+                                            activeCategory === category.id
+                                                ? 'bg-blue-600 text-white shadow-md shadow-blue-200 ring-2 ring-blue-600 ring-offset-2 ring-offset-slate-50'
+                                                : 'bg-white text-slate-500 hover:text-blue-600 hover:bg-blue-50 border border-slate-200'
+                                        }`}
+                                    >
+                                        <Icon name={category.icon} size={18} />
+                                        {category.label}預約
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* --- 預約狀況白底區塊 --- */}
+                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+                                {/* 切換視圖與日期導覽 */}
+                                <div className="bg-slate-50/80 backdrop-blur-sm border-b border-slate-100 px-6 py-4 flex flex-col md:flex-row justify-between items-center gap-6">
+                                    <div className="flex items-center gap-4">
+                                        <h2 className="font-black text-slate-800 text-lg">預約狀況表</h2>
+                                        <div className="px-4 py-1.5 bg-white text-blue-700 font-black text-sm rounded-full shadow-sm border border-slate-200 inline-flex items-center gap-2">
+                                            <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
+                                            {currentDisplayHeader}
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="flex items-center gap-4 bg-slate-200/50 p-1.5 rounded-2xl">
+                                        <div className="flex items-center bg-white rounded-xl shadow-sm p-1">
+                                            <button onClick={() => navigateDate(-1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 transition-colors"><Icon name="chevron-left" size={18} /></button>
+                                            <button onClick={goToCurrent} className="px-4 py-1 text-xs font-black text-slate-600 hover:text-blue-600 whitespace-nowrap">
+                                                {viewMode === 'daily' ? '跳到今天' : '跳到本月'}
+                                            </button>
+                                            <button onClick={() => navigateDate(1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 transition-colors"><Icon name="chevron-right" size={18} /></button>
+                                        </div>
+                                        <div className="flex gap-1 bg-slate-200/50 p-1 rounded-xl">
+                                            <button onClick={() => setViewMode('daily')} className={`px-5 py-2 text-xs font-black rounded-lg transition-all ${viewMode === 'daily' ? 'bg-white text-blue-600 shadow-md' : 'text-slate-500 hover:text-slate-700'}`}>日</button>
+                                            <button onClick={() => setViewMode('monthly')} className={`px-5 py-2 text-xs font-black rounded-lg transition-all ${viewMode === 'monthly' ? 'bg-white text-blue-600 shadow-md' : 'text-slate-500 hover:text-slate-700'}`}>月</button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="p-6 min-h-[500px]">
+                                    {!currentScriptUrl && (
+                                        <div className="flex flex-col items-center justify-center h-64 text-slate-400">
+                                            <Icon name="info" size={48} className="mb-4 opacity-50" />
+                                            <p className="font-bold">尚未綁定 {CATEGORIES.find(c => c.id === activeCategory)?.label} 的 Google Sheet 網址</p>
+                                            <p className="text-xs mt-2">請系統管理員於程式碼 SCRIPT_URLS 進行設定</p>
+                                        </div>
+                                    )}
+
+                                    {currentScriptUrl && viewMode === 'daily' ? (
+                                        /* 日視圖內容：依資源分組 */
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-in fade-in duration-300">
+                                            {RESOURCES[activeCategory].map(res => {
+                                                const resBookings = todaysBookings.filter(b => b.resourceId === res.id);
+                                                return (
+                                                    <div key={res.id} className="bg-slate-50/50 rounded-2xl p-5 border border-slate-100 flex flex-col h-full">
+                                                        <div className="flex items-center justify-between mb-4">
+                                                            <h3 className={`text-[11px] font-black px-3 py-1 rounded-full border shadow-sm ${res.color}`}>{res.name}</h3>
+															{activeCategory === 'room' ? (
+																<span className="text-[10px] font-bold text-slate-400">{resBookings.length} 筆預約</span>
+															) : (
+																<button
+																	onClick={() => toggleResourceStatus(res.id)}
+																	className={`text-[10px] font-black px-2.5 py-1 rounded-md border transition-all ${
+																		resourceStatuses[res.id] === 'borrowed' 
+																			? 'bg-rose-100 text-rose-600 border-rose-200 shadow-sm' 
+																			: 'bg-emerald-100 text-emerald-600 border-emerald-200 shadow-sm'
+																	} ${isAdmin ? 'cursor-pointer hover:scale-105' : 'cursor-default opacity-80'}`}
+																>
+																	{resourceStatuses[res.id] === 'borrowed' ? '借用中' : '可借用'}
+																</button>
+															)}                                                        </div>
+                                                        {resBookings.length === 0 ? (
+                                                            <div className="flex-1 flex flex-col items-center justify-center py-10 opacity-30">
+                                                                <Icon name={CATEGORIES.find(c => c.id === activeCategory)?.icon || "calendar"} size={32} />
+                                                                <p className="text-xs font-bold mt-2">今日尚無預約</p>
+                                                            </div>
+                                                        ) : (
+                                                            <div className="space-y-3">
+                                                                {resBookings.map(b => (
+                                                                    <div key={b.id} className="group relative bg-white p-4 rounded-xl border border-slate-100 shadow-sm hover:shadow-md hover:border-blue-200 transition-all">
+                                                                        <div className="flex items-center gap-3 mb-2">
+                                                                            <span className="text-[11px] font-black text-blue-600 bg-blue-50 px-2 py-0.5 rounded border border-blue-100">{b.startTime} - {b.endTime}</span>
+                                                                        </div>
+                                                                        <div className="text-sm font-black text-slate-700 truncate mb-1">{b.title}</div>
+                                                                        <div className="flex items-center justify-between">
+                                                                            <span className="text-[11px] text-slate-400 font-bold flex items-center gap-1">
+                                                                                <div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>
+                                                                                預約人：{b.user}
+                                                                            </span>
+                                                                            {isAdmin && (
+                                                                                <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-all translate-y-2 group-hover:translate-y-0">
+                                                                                    <button onClick={() => setEditingBooking(b)} className="text-slate-400 hover:text-blue-500 p-1.5 bg-slate-50 rounded-lg hover:shadow-sm transition-all"><Icon name="edit" size={14} /></button>
+                                                                                    <button onClick={() => handleDelete(b.id)} className="text-slate-400 hover:text-rose-500 p-1.5 bg-slate-50 rounded-lg hover:shadow-sm transition-all"><Icon name="x" size={14} /></button>
+                                                                                </div>
+                                                                            )}
+                                                                        </div>																			  
+                                                                    </div>
+                                                            
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    ) : currentScriptUrl && viewMode === 'monthly' ? (
+                                        /* 月視圖內容：渲染整月日曆 */
+                                        <div className="animate-in fade-in duration-500">
+                                            {renderMonthCalendar()}
+                                        </div>
+                                    ) : null}
+
+                                    <div className="mt-8 flex flex-col md:flex-row items-center justify-between gap-4 p-4 bg-rose-50 rounded-xl border border-rose-100">
+                                        <div className="flex items-center gap-3 text-rose-600">
+                                            <Icon name="info" size={20} />
+											{/* 根據當前的 activeCategory 顯示對應的注意事項 */}
+													<p className="text-xs md:text-sm font-black">
+														{CATEGORY_NOTES[activeCategory] || "注意事項：如需異動或取消已登記預約，請聯繫各類別管理者協助處理。"}
+													</p>
+                                        </div>
+
+
+
+
+
+
+
+                                      
+                                    </div>								  
+                                </div>
+                            </div>
+                        </main>
+                    </div>
+
+                    {/* --- 頁尾維護資訊 (Footer) --- */}
+                    <footer className="mt-12 pt-8 border-t border-slate-200 grid grid-cols-1 md:grid-cols-2 gap-8 pb-10">
+                        <div className="space-y-4">
+                            <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">系統開發與維護</h4>
+                            <div className="flex gap-8">
+                                <div className="space-y-1">
+                                    <p className="text-[11px] text-slate-400 font-black underline decoration-2 underline-offset-4">系統開發</p>
+                                    <p className="text-xs text-slate-600 font-bold">吳書緯 (分機 731) / 許卓嘉 (分機 734)</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="space-y-4">
+                            <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">各類別管理者</h4>
+                            <div className="grid grid-cols-3 gap-6">
+                                <div className="space-y-1">
+                                    <p className="text-[11px] text-rose-400 font-black underline decoration-2 underline-offset-4">9F會議室</p>
+                                    <div className="text-[10px] text-slate-500 font-bold grid grid-cols-1 gap-1">
+                                        <span>張芸眉 (分機 502) / 李協華 (分機 501)</span>
+                                        <span>鄭兆捷 (分機 243) / 廖詩華 (分機 241)</span>
+                                        <span>陳逸儒 (分機 211) / 劉玨妏 (分機 169)</span>
+                                    </div>
+                                </div>
+                                <div className="space-y-1">
+                                    <p className="text-[11px] text-emerald-400 font-black underline decoration-2 underline-offset-4">7F會議室</p>
+                                    <div className="text-[10px] text-slate-500 font-bold grid grid-cols-1 gap-1">
+                                        <span>陳惠琴 (分機 721) / 吳書緯 (分機 731)</span>
+                                    </div>
+                                </div>
+                                <div className="space-y-1">
+                                    <p className="text-[11px] text-blue-400 font-black underline decoration-2 underline-offset-4">會議設備/公務車/公務悠遊卡/</p>
+                                    <div className="text-[10px] text-slate-500 font-bold grid grid-cols-1 gap-1">
+                                        <span>劉玨妏 (分機 169)</span>		
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </footer>
+
+                    {/* --- 管理者編輯彈出視窗 (Edit Modal) --- */}
+                    {editingBooking && (
+                        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md flex items-center justify-center z-[100] p-4">
+                            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden">
+                                <div className="bg-indigo-600 px-6 py-5 text-white flex justify-between items-center">
+                                    <h3 className="font-black">修改預約資料</h3>
+                                    <button onClick={() => setEditingBooking(null)} className="p-2 hover:bg-white/20 rounded-xl transition-colors"><Icon name="x" size={20} /></button>
+                                </div>
+                                <div className="p-8 space-y-5">
+                                    {/* 編輯表單欄位 */}
+                                    <div className="space-y-1.5">
+                                        <label className="text-[11px] font-black text-slate-400 uppercase">預約項目</label>
+                                        <select value={editingBooking.resourceId} onChange={e => setEditingBooking({...editingBooking, resourceId: e.target.value})} className="w-full border rounded-xl p-3 text-sm font-bold bg-slate-50 focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all">
+                                            {RESOURCES[activeCategory].map(res => <option key={res.id} value={res.id}>{res.name}</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <label className="text-[11px] font-black text-slate-400 uppercase">預約日期</label>
+                                        <input type="date" value={editingBooking.date} onChange={e => setEditingBooking({...editingBooking, date: e.target.value})} className="w-full border rounded-xl p-3 text-sm font-bold bg-slate-50 focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all" />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div className="space-y-1.5">
+                                            <label className="text-[11px] font-black text-slate-400 uppercase">開始</label>
+                                            <select value={editingBooking.startTime} onChange={e => handleStartTimeChange(e.target.value, true)} className="w-full border rounded-xl p-3 text-sm font-bold bg-slate-50 outline-none transition-all">
+                                                {TIME_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
+                                            </select>
+                                        </div>
+                                        <div className="space-y-1.5">
+                                            <label className="text-[11px] font-black text-slate-400 uppercase">結束</label>
+                                            <select value={editingBooking.endTime} onChange={e => handleEndTimeChange(e.target.value, true)} className="w-full border rounded-xl p-3 text-sm font-bold bg-slate-50 outline-none transition-all">
+                                                {TIME_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <label className="text-[11px] font-black text-slate-400 uppercase">預約事由</label>
+                                        <input type="text" value={editingBooking.title} onChange={e => setEditingBooking({...editingBooking, title: e.target.value})} className="w-full border rounded-xl p-3 text-sm font-bold bg-slate-50 outline-none transition-all" />
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <label className="text-[11px] font-black text-slate-400 uppercase">預約者</label>
+                                        <input type="text" value={editingBooking.user} onChange={e => setEditingBooking({...editingBooking, user: e.target.value})} className="w-full border rounded-xl p-3 text-sm font-bold bg-slate-50 outline-none transition-all" />
+                                    </div>
+                                    {/* ... 其他編輯欄位比照主表單 ... */}
+                                    <div className="flex gap-4 pt-6">
+                                        <button onClick={() => setEditingBooking(null)} className="flex-1 py-3 text-slate-500 font-black hover:bg-slate-100 rounded-xl transition-colors">取消</button>
+                                        <button onClick={handleUpdate} disabled={isLoading} className="flex-1 py-3 bg-indigo-600 text-white font-black rounded-xl shadow-lg hover:bg-indigo-700 transition-all">確認儲存</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* --- 全域通知元件 (Toast) --- */}
+                    {notification && (
+                        <div className={`fixed bottom-8 left-1/2 -translate-x-1/2 md:left-auto md:right-8 md:translate-x-0 px-8 py-4 rounded-2xl shadow-2xl text-white font-black z-[110] animate-in slide-in-from-bottom-10 duration-500 flex items-center gap-3 ${notification.type === 'error' ? 'bg-rose-500 shadow-rose-200' : 'bg-emerald-600 shadow-emerald-200'}`}>
+                            <Icon name={notification.type === 'error' ? 'x' : 'info'} size={20} />
+                            {notification.message}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
