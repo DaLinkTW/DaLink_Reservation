@@ -1,7 +1,8 @@
 <!DOCTYPE html>
 <html lang="zh-TW">
 <head>
-    <meta charset="UTF-8">
+    <link rel="icon" href="./favicon.ico" type="image/x-icon">
+	<meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>大林聯合建築師事務所 公司資源預約管理系統 V2.0</title>
     <script src="https://cdn.tailwindcss.com"></script>
@@ -43,7 +44,7 @@
             room: "https://script.google.com/macros/s/AKfycbwnvbW-uxGV12R36TjL6I6732P4sKNBngUPq-8zhM38ohD_NYy44Tz4Bc5KJVgf0vUm/exec", // 請填入「會議室」的 GAS URL
             equipment: "https://script.google.com/macros/s/AKfycby1K8Y1hNP5keniXUGDS-CHQvczXCIxJQP2QLoRgBKdXLKf4ZSbIWlAZpandswIUzDTyw/exec", // 請填入「會議設備」的 GAS URL
 			car: "https://script.google.com/macros/s/AKfycby58c0xn5d-J68jd_7mMjkHTvGbRDpI1_p8qbr6YI4-uNhNvNTaczq-wuLLcos6TAYw/exec", // 請填入「公務車」的 GAS URL
-            easycard: "https://script.google.com/macros/s/AKfycbz2DKa-ZooLkFC-9y7bKh1zbbHCrUUeB0SF58CRYdjsPzOsu2JV2XqSN1OJ7P21Od3w/exec"   // 請填入「悠遊卡」的 GAS URL
+            easycard: "https://script.google.com/macros/s/AKfycby36mWLzUKvv7bQqPXzFEhBVBgFjragJCsXGFqCwD9lE-ukxi0ldSqbR0ONL_H8dsqY/exec"   // 請填入「悠遊卡」的 GAS URL
         };		  
 		
         const ADMIN_PASSWORD = "admin0408"; 
@@ -52,7 +53,7 @@
         const VERSION_LOGS = [
             { 
                 version: "V2.0", 
-                date: "2026-05-11", 
+                date: "2026-05-18", 
                 features: ["新增公務車、會議設備、悠遊卡預約功能","管理者名單及項目異動"] 
             },
 			{ 
@@ -84,8 +85,8 @@
 		const CATEGORY_NOTES = {
 			room: "注意事項：如需異動或取消已登記預約，請聯繫 9F/7F 各樓層管理者協助處理。",
 			equipment: "注意事項：設備借用請愛惜使用，歸還時請確認配件（線材、滑鼠等）是否齊全。",
-			car: "注意事項：用車完畢請務必歸還鑰匙給劉姐，如有違規罰單由借用人負責。",
-			easycard: "注意事項：使用完畢請務必歸還給劉姐，遺失請立即通知及掛失。"
+			car: "注意事項：用車完畢請務必歸還鑰匙給管理者，如有違規罰單由借用人負責。",
+			easycard: "注意事項：使用完畢請務必歸還給管理者，遺失請立即通知及掛失。"
 		};
 
         // 各類別資源清單設定 (可自行擴充/修改)
@@ -118,7 +119,9 @@
                 { id: 'card-b', name: '公務悠遊卡 02', color: 'bg-amber-50 border-eamber-200 text-amber-700', dot: 'bg-amber-500' },
                 { id: 'card-c', name: '公務悠遊卡 03', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' },
 				{ id: 'card-d', name: '公務悠遊卡 04', color: 'bg-emerald-50 border-emerald-200 text-emerald-700', dot: 'bg-emerald-500' },
-                { id: 'card-e', name: '公務悠遊卡 05', color: 'bg-violet-50 border-lviolet-200 text-violet-700', dot: 'bg-violet-500' }
+                { id: 'card-e', name: '公務悠遊卡 05', color: 'bg-violet-50 border-lviolet-200 text-violet-700', dot: 'bg-violet-500' },
+				{ id: 'card-f', name: '公務悠遊卡 06', color: 'bg-purple-50 border-purple-200 text-purple-700', dot: 'bg-purple-500' },
+				{ id: 'card-g', name: '公務悠遊卡 07', color: 'bg-fuchsia-50 border-fuchsia-200 text-fuchsia-700', dot: 'bg-fuchsia-500' }
             ]
         };																																	 																												  			  	  
         // 生成時間下拉選單 (08:00 - 20:30)
@@ -1030,7 +1033,7 @@
                                     </div>
                                 </div>
                                 <div className="space-y-1">
-                                    <p className="text-[11px] text-blue-400 font-black underline decoration-2 underline-offset-4">會議設備/公務車/公務悠遊卡/</p>
+                                    <p className="text-[11px] text-blue-400 font-black underline decoration-2 underline-offset-4">會議設備/公務車/公務悠遊卡</p>
                                     <div className="text-[10px] text-slate-500 font-bold grid grid-cols-1 gap-1">
                                         <span>劉玨妏 (分機 169)</span>		
                                     </div>
