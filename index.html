@@ -41,10 +41,10 @@
         const CURRENT_VERSION = "V2.0";
         // Google Apps Script 部署網址 (後端 API)
         const SCRIPT_URLS = {
-            room: "https://script.google.com/macros/s/AKfycbwnvbW-uxGV12R36TjL6I6732P4sKNBngUPq-8zhM38ohD_NYy44Tz4Bc5KJVgf0vUm/exec", // 請填入「會議室」的 GAS URL
-            equipment: "https://script.google.com/macros/s/AKfycby1K8Y1hNP5keniXUGDS-CHQvczXCIxJQP2QLoRgBKdXLKf4ZSbIWlAZpandswIUzDTyw/exec", // 請填入「會議設備」的 GAS URL
-			car: "https://script.google.com/macros/s/AKfycby58c0xn5d-J68jd_7mMjkHTvGbRDpI1_p8qbr6YI4-uNhNvNTaczq-wuLLcos6TAYw/exec", // 請填入「公務車」的 GAS URL
-            easycard: "https://script.google.com/macros/s/AKfycby36mWLzUKvv7bQqPXzFEhBVBgFjragJCsXGFqCwD9lE-ukxi0ldSqbR0ONL_H8dsqY/exec"   // 請填入「悠遊卡」的 GAS URL
+            room: "https://script.google.com/macros/s/AKfycbxfsRc_uQmzkn5CZ7GHkBbcl8Y1RgNc3-1-tzfYM9PD80uCZh8HjoHGP7F5TAB6Jkb0/exec", // 請填入「會議室」的 GAS URL
+            equipment: "https://script.google.com/macros/s/AKfycbyFznoFGEIiTvoDwHXfKNr2LYNtAM5ZhpLgSgvLezbRb6umInhXwjot0J7E4OH8xcf3hg/exec", // 請填入「會議設備」的 GAS URL
+			car: "https://script.google.com/macros/s/AKfycby0OMd4LoFVv2y23TJGgG-Ip6VWMBCczo7Gz0jzecWez3la6VWn7eRJ4M8esv-FbL49/exec", // 請填入「公務車」的 GAS URL
+            easycard: "https://script.google.com/macros/s/AKfycbw4obIu0BITTAzYRgtKy78t9r8gbOGLrr2SRqmRp7u_aNquNl0rGh_2UyWAr3Nd6KU/exec"   // 請填入「悠遊卡」的 GAS URL
         };		  
 		
         const ADMIN_PASSWORD = "admin0408"; 
@@ -53,8 +53,8 @@
         const VERSION_LOGS = [
             { 
                 version: "V2.0", 
-                date: "2026-05-18", 
-                features: ["新增公務車、會議設備、悠遊卡預約功能","管理者名單及項目異動"] 
+                date: "2026-06-01", 
+                features: ["新增公務車、會議設備、悠遊卡預約功能","開放「會議室」項目修改及刪除權限","管理者名單及項目異動"] 
             },
 			{ 
                 version: "V1.4.1", 
@@ -83,7 +83,7 @@
 		
 		// 資源類別定義與對應注意事項
 		const CATEGORY_NOTES = {
-			room: "注意事項：如需異動或取消已登記預約，請聯繫 9F/7F 各樓層管理者協助處理。",
+			room: "注意事項：請務必先與同仁完成協調，再行異動或取消其已登記預約資料。",
 			equipment: "注意事項：設備借用請愛惜使用，歸還時請確認配件（線材、滑鼠等）是否齊全。",
 			car: "注意事項：用車完畢請務必歸還鑰匙給管理者，如有違規罰單由借用人負責。",
 			easycard: "注意事項：使用完畢請務必歸還給管理者，遺失請立即通知及掛失。"
@@ -102,26 +102,29 @@
 			equipment: [
                 { id: 'eq-a', name: '筆電Dell（藍）─含HDMI線、滑鼠、電源線', color: 'bg-rose-50 border-rose-200 text-rose-700', dot: 'bg-rose-500' },
                 { id: 'eq-b', name: '筆電Dell（銀）─含滑鼠、電源線', color: 'bg-amber-50 border-amber-200 text-amber-700', dot: 'bg-amber-500' },
-                { id: 'eq-c', name: '筆電Genuine（黑）─含無線滑鼠（注意USB）、電源線', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' },
-				{ id: 'eq-d', name: '筆電ASUS（黑）─工地長期借用', color: 'bg-slate-100 border-slate-200 text-slate-400', dot: 'bg-slate-400' },
-				{ id: 'eq-e', name: '投影機（銀）─含HDMI線、遙控器、三轉二接頭', color: 'bg-emerald-50 border-emerald-200 text-emerald-700', dot: 'bg-emerald-500' },
-				{ id: 'eq-f', name: '投影機（金）─含HDMI線、遙控器、三轉二接頭', color: 'bg-violet-50 border-violet-200 text-violet-700', dot: 'bg-violet-500' },
-				{ id: 'eq-g', name: '簡報筆', color: 'bg-purple-50 border-purple-200 text-purple-700', dot: 'bg-purple-500' },
-				{ id: 'eq-h', name: '延長線', color: 'bg-fuchsia-50 border-fuchsia-200 text-fuchsia-700', dot: 'bg-fuchsia-500' },
-				{ id: 'eq-i', name: '耳機轉接頭A', color: 'bg-pink-50 border-pink-200 text-pink-700', dot: 'bg-pink-500' },
-				{ id: 'eq-j', name: '耳機轉接頭B', color: 'bg-teal-50 border-teal-200 text-teal-700', dot: 'bg-teal-500' },
+                { id: 'eq-c', name: '筆電Dell（綠）─含滑鼠、電源線', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' },
+				{ id: 'eq-d', name: '筆電MSI 01──含滑鼠、電源線', color: 'bg-emerald-50 border-emerald-200 text-emerald-700', dot: 'bg-emerald-500' },
+				{ id: 'eq-e', name: '筆電MSI 02──含滑鼠、電源線', color: 'bg-violet-50 border-violet-200 text-violet-700', dot: 'bg-violet-500' },
+				{ id: 'eq-f', name: '筆電Genuine（黑）─含無線滑鼠（注意USB）、電源線', color: 'bg-purple-50 border-purplew-200 text-purple-700', dot: 'bg-purple-500' },
+				{ id: 'eq-g', name: '筆電ASUS（黑）─工地長期借用', color: 'bg-slate-100 border-slate-200 text-slate-400', dot: 'bg-slate-400' },
+				{ id: 'eq-h', name: '投影機（銀）─含HDMI線、遙控器、三轉二接頭', color: 'bg-pink-50 border-pink-200 text-pink-700', dot: 'bg-pink-500' },
+				{ id: 'eq-i', name: '投影機（金）─含HDMI線、遙控器、三轉二接頭', color: 'bg-teal-50 border-teal-200 text-teal-700', dot: 'bg-teal-500' },
+				{ id: 'eq-j', name: '投影機（白）─含HDMI線、遙控器、三轉二接頭', color: 'bg-fuchsia-50 border-fuchsia-200 text-fuchsia-700', dot: 'bg-fuchsia-500' },
+				{ id: 'eq-k', name: '喇叭', color: 'bg-rose-50 border-rose-200 text-rose-700', dot: 'bg-rose-500' },
+				{ id: 'eq-l', name: '簡報筆', color: 'bg-amber-50 border-amber-200 text-amber-700', dot: 'bg-amber-500' },
+				{ id: 'eq-m', name: '耳機轉接頭A', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' },
+				{ id: 'eq-n', name: '耳機轉接頭B', color: 'bg-emerald-50 border-emerald-200 text-emerald-700', dot: 'bg-emerald-500' },
+				{ id: 'eq-o', name: '延長線', color: 'bg-violet-50 border-violet-200 text-violet-700', dot: 'bg-violet-500' },
             ],
             car: [
                 { id: 'car-a', name: '公務車 A (RFG-2000)', color: 'bg-rose-50 border-rose-200 text-rose-700', dot: 'bg-rose-500' }
             ],
             easycard: [
                 { id: 'card-a', name: '公務悠遊卡 01', color: 'bg-rose-50 border-rose-200 text-rose-700', dot: 'bg-rose-500' },
-                { id: 'card-b', name: '公務悠遊卡 02', color: 'bg-amber-50 border-eamber-200 text-amber-700', dot: 'bg-amber-500' },
                 { id: 'card-c', name: '公務悠遊卡 03', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' },
 				{ id: 'card-d', name: '公務悠遊卡 04', color: 'bg-emerald-50 border-emerald-200 text-emerald-700', dot: 'bg-emerald-500' },
                 { id: 'card-e', name: '公務悠遊卡 05', color: 'bg-violet-50 border-lviolet-200 text-violet-700', dot: 'bg-violet-500' },
-				{ id: 'card-f', name: '公務悠遊卡 06', color: 'bg-purple-50 border-purple-200 text-purple-700', dot: 'bg-purple-500' },
-				{ id: 'card-g', name: '公務悠遊卡 07', color: 'bg-fuchsia-50 border-fuchsia-200 text-fuchsia-700', dot: 'bg-fuchsia-500' }
+				{ id: 'card-f', name: '公務悠遊卡 06', color: 'bg-purple-50 border-purple-200 text-purple-700', dot: 'bg-purple-500' }
             ]
         };																																	 																												  			  	  
         // 生成時間下拉選單 (08:00 - 20:30)
@@ -139,6 +142,7 @@
 		const PROJECTS_DATA = {
 			"2025": [
 				{ id: "25003", name: "臺北市萬華福興社會住宅2區" },
+				{ id: "25008", name: "慶城街都更" },
 				{ id: "25012", name: "新北市新莊塭仔圳社會住宅" },
 				{ id: "25024", name: "桃園市大溪埔頂社會住宅" },
 				{ id: "25034", name: "桃園市中壢中運段社會住宅" }
@@ -499,6 +503,13 @@
             // 更新既有預約 (刪除舊的 + 新增新的)
             const handleUpdate = async () => {
                 if (!editingBooking) return;
+				
+                // 權限防呆安全盾：若不是會議室 (room) 且不是管理員，則中斷
+                if (activeCategory !== 'room' && !isAdmin) {
+                    showNotification("安全限制：此項目僅限管理員進行修改", "error");
+                    return;
+                }
+				
                 const trimmedTitle = editingBooking.title.trim();
                 const trimmedUser = editingBooking.user.trim();
                 if (!trimmedTitle || !trimmedUser) return showNotification("欄位不可為空", "error");
@@ -522,7 +533,13 @@
 
             // 刪除預約 (僅限管理者)
             const handleDelete = async (id) => {
-                if (!isAdmin) return;
+			
+                // 權限檢查：非會議室項目且非管理員
+                if (activeCategory !== 'room' && !isAdmin) {
+                    showNotification("權限不足：此項目僅限管理員進行刪除", "error");
+                    return;
+                }
+                			
                 if (!confirm("確定要刪除這筆預約嗎？")) return;
                 setIsSyncing(true);
                 try {
@@ -959,7 +976,8 @@
                                                                                 <div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>
                                                                                 預約人：{b.user}
                                                                             </span>
-                                                                            {isAdmin && (
+																			{/* 權限核心修改：如果是「會議室」則全面開放修改、刪除按鈕；其餘分類則仍需要管理員權限 */}
+                                                                            {(activeCategory === 'room' || isAdmin) && (
                                                                                 <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-all translate-y-2 group-hover:translate-y-0">
                                                                                     <button onClick={() => setEditingBooking(b)} className="text-slate-400 hover:text-blue-500 p-1.5 bg-slate-50 rounded-lg hover:shadow-sm transition-all"><Icon name="edit" size={14} /></button>
                                                                                     <button onClick={() => handleDelete(b.id)} className="text-slate-400 hover:text-rose-500 p-1.5 bg-slate-50 rounded-lg hover:shadow-sm transition-all"><Icon name="x" size={14} /></button>
@@ -1018,20 +1036,6 @@
                         <div className="space-y-4">
                             <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">各類別管理者</h4>
                             <div className="grid grid-cols-3 gap-6">
-                                <div className="space-y-1">
-                                    <p className="text-[11px] text-rose-400 font-black underline decoration-2 underline-offset-4">9F會議室</p>
-                                    <div className="text-[10px] text-slate-500 font-bold grid grid-cols-1 gap-1">
-                                        <span>張芸眉 (分機 502) / 李協華 (分機 501)</span>
-                                        <span>鄭兆捷 (分機 243) / 廖詩華 (分機 241)</span>
-                                        <span>陳逸儒 (分機 211) / 劉玨妏 (分機 169)</span>
-                                    </div>
-                                </div>
-                                <div className="space-y-1">
-                                    <p className="text-[11px] text-emerald-400 font-black underline decoration-2 underline-offset-4">7F會議室</p>
-                                    <div className="text-[10px] text-slate-500 font-bold grid grid-cols-1 gap-1">
-                                        <span>陳惠琴 (分機 721) / 吳書緯 (分機 731)</span>
-                                    </div>
-                                </div>
                                 <div className="space-y-1">
                                     <p className="text-[11px] text-blue-400 font-black underline decoration-2 underline-offset-4">會議設備/公務車/公務悠遊卡</p>
                                     <div className="text-[10px] text-slate-500 font-bold grid grid-cols-1 gap-1">
