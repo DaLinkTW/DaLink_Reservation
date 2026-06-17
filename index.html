@@ -8,7 +8,8 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- 將 Babel 版本固定至穩定的 7.23.6 以避免最新版的模組載入錯誤 -->
+    <script src="https://unpkg.com/@babel/standalone@7.23.6/babel.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap');
 
@@ -41,10 +42,10 @@
         const CURRENT_VERSION = "V2.0";
         // Google Apps Script 部署網址 (後端 API)
         const SCRIPT_URLS = {
-            room: "https://script.google.com/macros/s/AKfycbxfsRc_uQmzkn5CZ7GHkBbcl8Y1RgNc3-1-tzfYM9PD80uCZh8HjoHGP7F5TAB6Jkb0/exec", // 請填入「會議室」的 GAS URL
-            equipment: "https://script.google.com/macros/s/AKfycbyFznoFGEIiTvoDwHXfKNr2LYNtAM5ZhpLgSgvLezbRb6umInhXwjot0J7E4OH8xcf3hg/exec", // 請填入「會議設備」的 GAS URL
-			car: "https://script.google.com/macros/s/AKfycby0OMd4LoFVv2y23TJGgG-Ip6VWMBCczo7Gz0jzecWez3la6VWn7eRJ4M8esv-FbL49/exec", // 請填入「公務車」的 GAS URL
-            easycard: "https://script.google.com/macros/s/AKfycbw4obIu0BITTAzYRgtKy78t9r8gbOGLrr2SRqmRp7u_aNquNl0rGh_2UyWAr3Nd6KU/exec"   // 請填入「悠遊卡」的 GAS URL
+            room: "https://script.google.com/macros/s/AKfycbxfsRc_uQmzkn5CZ7GHkBbcl8Y1RgNc3-1-tzfYM9PD80uCZh8HjoHGP7F5TAB6Jkb0/exec",
+            equipment: "https://script.google.com/macros/s/AKfycbyFznoFGEIiTvoDwHXfKNr2LYNtAM5ZhpLgSgvLezbRb6umInhXwjot0J7E4OH8xcf3hg/exec",
+			car: "https://script.google.com/macros/s/AKfycby0OMd4LoFVv2y23TJGgG-Ip6VWMBCczo7Gz0jzecWez3la6VWn7eRJ4M8esv-FbL49/exec",
+            easycard: "https://script.google.com/macros/s/AKfycbw4obIu0BITTAzYRgtKy78t9r8gbOGLrr2SRqmRp7u_aNquNl0rGh_2UyWAr3Nd6KU/exec"
         };		  
 		
         const ADMIN_PASSWORD = "admin0408"; 
@@ -78,7 +79,7 @@
             { id: 'room', label: '會議室', icon: 'calendar' },
             { id: 'equipment', label: '會議設備', icon: 'monitor' },
             { id: 'car', label: '公務車', icon: 'car' },
-            { id: 'easycard', label: '公務悠遊卡', icon: 'credit-card' }																															   																																					 
+            { id: 'easycard', label: '公務悠遊卡', icon: 'credit-card' }
         ];
 		
 		// 資源類別定義與對應注意事項
@@ -105,7 +106,7 @@
                 { id: 'eq-c', name: '筆電Dell（綠）─含滑鼠、電源線', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' },
 				{ id: 'eq-d', name: '筆電MSI 01──含滑鼠、電源線', color: 'bg-emerald-50 border-emerald-200 text-emerald-700', dot: 'bg-emerald-500' },
 				{ id: 'eq-e', name: '筆電MSI 02──含滑鼠、電源線', color: 'bg-violet-50 border-violet-200 text-violet-700', dot: 'bg-violet-500' },
-				{ id: 'eq-f', name: '筆電Genuine（黑）─含無線滑鼠（注意USB）、電源線', color: 'bg-purple-50 border-purplew-200 text-purple-700', dot: 'bg-purple-500' },
+				{ id: 'eq-f', name: '筆電Genuine（黑）─含無線滑鼠（注意USB）、電源線', color: 'bg-purple-50 border-purple-200 text-purple-700', dot: 'bg-purple-500' },
 				{ id: 'eq-g', name: '筆電ASUS（黑）─工地長期借用', color: 'bg-slate-100 border-slate-200 text-slate-400', dot: 'bg-slate-400' },
 				{ id: 'eq-h', name: '投影機（銀）─含HDMI線、遙控器、三轉二接頭', color: 'bg-pink-50 border-pink-200 text-pink-700', dot: 'bg-pink-500' },
 				{ id: 'eq-i', name: '投影機（金）─含HDMI線、遙控器、三轉二接頭', color: 'bg-teal-50 border-teal-200 text-teal-700', dot: 'bg-teal-500' },
@@ -123,7 +124,7 @@
                 { id: 'card-a', name: '公務悠遊卡 01', color: 'bg-rose-50 border-rose-200 text-rose-700', dot: 'bg-rose-500' },
                 { id: 'card-c', name: '公務悠遊卡 03', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' },
 				{ id: 'card-d', name: '公務悠遊卡 04', color: 'bg-emerald-50 border-emerald-200 text-emerald-700', dot: 'bg-emerald-500' },
-                { id: 'card-e', name: '公務悠遊卡 05', color: 'bg-violet-50 border-lviolet-200 text-violet-700', dot: 'bg-violet-500' },
+                { id: 'card-e', name: '公務悠遊卡 05', color: 'bg-violet-50 border-violet-200 text-violet-700', dot: 'bg-violet-500' },
 				{ id: 'card-f', name: '公務悠遊卡 06', color: 'bg-purple-50 border-purple-200 text-purple-700', dot: 'bg-purple-500' }
             ]
         };																																	 																												  			  	  
@@ -246,7 +247,7 @@
                 calendar: <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />,
                 car: <React.Fragment><path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2"/><circle cx="7" cy="17" r="2"/><path d="M9 17h6"/><circle cx="17" cy="17" r="2"/></React.Fragment>,
                 monitor: <React.Fragment><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></React.Fragment>,
-                "credit-card": <React.Fragment><rect width="22" height="14" x="1" y="5" rx="2"/><line x1="1" x2="23" y1="10" y2="10"/></React.Fragment>,																																																																															 																																													 																																						
+                "credit-card": <React.Fragment><rect width="22" height="14" x="1" y="5" rx="2"/><line x1="1" x2="23" y1="10" y2="10"/></React.Fragment>,
                 cloud: <path d="M17.5 19c3.037 0 5.5-2.463 5.5-5.5 0-2.97-2.354-5.402-5.304-5.494A7 7 0 1 0 5 13.045c0 .015 0 .03.001.045C2.181 13.528 0 15.937 0 18.889c0 3.037 2.463 5.5 5.5 5.5h12z" />,
                 "chevron-left": <polyline points="15 18 9 12 15 6" />,
                 "chevron-right": <polyline points="9 18 15 12 9 6" />,
@@ -330,8 +331,11 @@
                     const response = await fetch(currentScriptUrl);
                     const rawData = await response.json();
                     
+                    // 防呆：確保 rawData 為陣列，避免若 GAS 回傳錯誤物件而導致 rawData.map 拋出錯誤
+                    const dataArray = Array.isArray(rawData) ? rawData : (rawData?.data && Array.isArray(rawData.data) ? rawData.data : []);
+
                     // 資料標準化，相容原有 roomId 與新的 resourceId
-                    const normalizedData = rawData.map(item => ({
+                    const normalizedData = dataArray.map(item => ({
                         id: String(item.id || item['編號'] || Math.random()),
                         resourceId: item.resourceId || item.roomId || item['會議室'] || item['資源'] || RESOURCES[activeCategory][0].id,
                         date: formatDate(item.date || item['日期']),
@@ -360,17 +364,16 @@
 				const fetchStatus = async () => {
 					if (!currentScriptUrl) return; // 確保有網址才執行
 					try {
-						// 修正1：將未定義的 API_URL 改為 currentScriptUrl
 						const response = await fetch(`${currentScriptUrl}?type=status`);
 						const data = await response.json();
-						// 修正2：補上 's'，改為正確的 setResourceStatuses
-						setResourceStatuses(data); 
+						// 防呆：確保回傳是個物件，避免若為 null 會導致後續畫面取值拋出 TypeError 讓整個系統當機 (White Screen of Death)
+						setResourceStatuses(data || {}); 
 					} catch (error) {
 						console.error("無法同步資源狀態:", error);
 					}
 				};
 				fetchStatus();
-			}, [currentScriptUrl]); // 修正3：加入依賴陣列
+			}, [currentScriptUrl]);
 						
             // ============================================================
             // 5. 事件處理邏輯 (Event Handlers)
@@ -510,8 +513,8 @@
                     return;
                 }
 				
-                const trimmedTitle = editingBooking.title.trim();
-                const trimmedUser = editingBooking.user.trim();
+                const trimmedTitle = (editingBooking.title || '').trim();
+                const trimmedUser = (editingBooking.user || '').trim();
                 if (!trimmedTitle || !trimmedUser) return showNotification("欄位不可為空", "error");
                 if (editingBooking.startTime >= editingBooking.endTime) return showNotification("結束時間必須大於開始時間", "error");
                 const conflict = checkConflict(editingBooking, editingBooking.id);
@@ -556,17 +559,17 @@
 					return;
 				}
 
-				// 判斷新的狀態是什麼
-				const currentStatus = resourceStatuses[resId];
+				// 判斷新的狀態是什麼 (防呆處理，確保 resourceStatuses 不為空)
+				const currentStatus = (resourceStatuses || {})[resId];
 				const newStatus = currentStatus === 'borrowed' ? 'available' : 'borrowed';
 
 				// 先更新前端畫面，讓使用者感覺操作順暢
 				setResourceStatuses(prev => ({
-					...prev,
+					...(prev || {}),
 					[resId]: newStatus
 				}));
 
-				// 修正核心：將新狀態送到後端 GAS 儲存
+				// 狀態送到後端 GAS 儲存
 				try {
 					await fetch(currentScriptUrl, {
 						method: 'POST',
@@ -583,7 +586,7 @@
 				} catch (error) {
 					// 如果 API 失敗，將畫面狀態還原
 					setResourceStatuses(prev => ({
-						...prev,
+						...(prev || {}),
 						[resId]: currentStatus
 					}));
 					showNotification("同步至資料庫失敗，請檢查網路", "error");
@@ -803,6 +806,7 @@
 														className="w-full rounded-xl border-emerald-200 border p-2 bg-white text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all"
 													>
 														{YEARS.map(y => <option key={y} value={y}>{y} 年</option>)}
+                                                        <option value="Others">其他 (Others)</option>
 													</select>
 												</div>
 												
@@ -811,20 +815,16 @@
 													<label className="text-[10px] font-bold text-emerald-500 ml-1">案號 + 案名</label>
 													<select 
 														value={formData.syncProjectId} 
-							  
-										 
-																									   
 														onChange={e => setFormData({...formData, syncProjectId: e.target.value})}
-				
 														className="w-full rounded-xl border-emerald-200 border p-2 bg-white text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all"
 													>
 														<option value="">-- 請選擇專案 --</option>
-														{PROJECTS_DATA[formData.syncYear]?.map(p => (
+														{(PROJECTS_DATA[formData.syncYear] || []).map(p => (
 															<option key={p.id} value={p.id}>{p.id} {p.name}</option>
 														))}
 													</select>
 												</div>
-												<p className="text-[10px] text-emerald-400 font-medium leading-relax px-1 m-0">
+												<p className="text-[10px] text-emerald-400 font-medium leading-relaxed px-1 m-0">
 												1.選取後將同步建立至Google日曆。<br/>
 												2.如需增加可同步專案，需先於公司Google帳號建立日曆，再通知系統開發協助處理。
 												</p>
@@ -940,6 +940,8 @@
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-in fade-in duration-300">
                                             {RESOURCES[activeCategory].map(res => {
                                                 const resBookings = todaysBookings.filter(b => b.resourceId === res.id);
+                                                // 保護屬性讀取避免當機
+                                                const currentStatus = (resourceStatuses || {})[res.id]; 
                                                 return (
                                                     <div key={res.id} className="bg-slate-50/50 rounded-2xl p-5 border border-slate-100 flex flex-col h-full">
                                                         <div className="flex items-center justify-between mb-4">
@@ -950,12 +952,12 @@
 																<button
 																	onClick={() => toggleResourceStatus(res.id)}
 																	className={`text-[10px] font-black px-2.5 py-1 rounded-md border transition-all ${
-																		resourceStatuses[res.id] === 'borrowed' 
+																		currentStatus === 'borrowed' 
 																			? 'bg-rose-100 text-rose-600 border-rose-200 shadow-sm' 
 																			: 'bg-emerald-100 text-emerald-600 border-emerald-200 shadow-sm'
 																	} ${isAdmin ? 'cursor-pointer hover:scale-105' : 'cursor-default opacity-80'}`}
 																>
-																	{resourceStatuses[res.id] === 'borrowed' ? '借用中' : '可借用'}
+																	{currentStatus === 'borrowed' ? '借用中' : '可借用'}
 																</button>
 															)}                                                        </div>
                                                         {resBookings.length === 0 ? (
@@ -1008,14 +1010,6 @@
 														{CATEGORY_NOTES[activeCategory] || "注意事項：如需異動或取消已登記預約，請聯繫各類別管理者協助處理。"}
 													</p>
                                         </div>
-
-
-
-
-
-
-
-                                      
                                     </div>								  
                                 </div>
                             </div>
@@ -1037,7 +1031,7 @@
                             <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">各類別管理者</h4>
                             <div className="grid grid-cols-3 gap-6">
                                 <div className="space-y-1">
-                                    <p className="text-[11px] text-blue-400 font-black underline decoration-2 underline-offset-4">會議設備/公務車/公務悠遊卡</p>
+                                    <p className="text-[11px] text-blue-400 font-black underline decoration-2 underline-offset-4">會議設備/公務車/公務悠構卡</p>
                                     <div className="text-[10px] text-slate-500 font-bold grid grid-cols-1 gap-1">
                                         <span>劉珏妏 (分機 169)</span>		
                                     </div>
@@ -1070,13 +1064,13 @@
                                         <div className="space-y-1.5">
                                             <label className="text-[11px] font-black text-slate-400 uppercase">開始</label>
                                             <select value={editingBooking.startTime} onChange={e => handleStartTimeChange(e.target.value, true)} className="w-full border rounded-xl p-3 text-sm font-bold bg-slate-50 outline-none transition-all">
-                                                {TIME_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
+                                                {TIME_OPTIONS.slice(0, -1).map(t => <option key={t} value={t}>{t}</option>)}
                                             </select>
                                         </div>
                                         <div className="space-y-1.5">
                                             <label className="text-[11px] font-black text-slate-400 uppercase">結束</label>
                                             <select value={editingBooking.endTime} onChange={e => handleEndTimeChange(e.target.value, true)} className="w-full border rounded-xl p-3 text-sm font-bold bg-slate-50 outline-none transition-all">
-                                                {TIME_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
+                                                {TIME_OPTIONS.slice(1).map(t => <option key={t} value={t}>{t}</option>)}
                                             </select>
                                         </div>
                                     </div>
