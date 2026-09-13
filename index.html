@@ -4,7 +4,7 @@
     <link rel="icon" href="./favicon.ico" type="image/x-icon">
 	<meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>大林聯合建築師事務所 公司資源預約管理系統 V2.1</title>
+    <title>大林聯合建築師事務所 公司資源預約管理系統 V2.2 RC2</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -39,7 +39,7 @@
         // ============================================================
         // 1. 系統常數設定 (System Configuration)
         // ============================================================
-        const CURRENT_VERSION = "V2.1";
+        const CURRENT_VERSION = "V2.2";
         // Google Apps Script 部署網址 (後端 API)
         const SCRIPT_URLS = {
             room: "https://script.google.com/macros/s/AKfycbxSAxtLhn-CmHjK7N3J7U-8ernb9CnVYIUArEJmT8VI-Dj82rexMq2E9jl3ZQlBr5DD/exec",
@@ -50,9 +50,20 @@
         };		  
 		
         const ADMIN_PASSWORD = "admin0408"; 
+        // 管理者登入狀態記憶：只記錄是否已驗證，不儲存密碼
+        const ADMIN_LOGIN_STORAGE_KEY = "company-resource-admin-authenticated";
 
         // 系統更新日誌內容
         const VERSION_LOGS = [
+            {
+                version: "V2.2",
+                date: "2026-09-13",
+                features: [
+                    "新增管理者資源顯示／隱藏功能（公司共用同步）",
+                    "新增管理者預約登記報表輸出功能",
+                    "新增管理者登入狀態記憶功能"
+                ]
+            },
             { 
                 version: "V2.1", 
                 date: "2026-08-06", 
@@ -270,7 +281,9 @@
                 unlock: <React.Fragment><rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 9.9-1" /></React.Fragment>,
                 edit: <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />,
                 info: <React.Fragment><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></React.Fragment>,
-                refresh: <React.Fragment><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></React.Fragment>
+                refresh: <React.Fragment><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></React.Fragment>,
+                eye: <React.Fragment><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /></React.Fragment>,
+                "eye-off": <React.Fragment><path d="M3 3l18 18" /><path d="M10.6 10.6a2 2 0 0 0 2.8 2.8" /><path d="M9.9 4.2A10.7 10.7 0 0 1 12 4c6.5 0 10 8 10 8a18.7 18.7 0 0 1-2.1 3.2" /><path d="M6.7 6.7C3.9 8.6 2 12 2 12s3.5 8 10 8a10.9 10.9 0 0 0 5.3-1.4" /></React.Fragment>
             };
             return (
                 <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`${className} ${name === 'loader-2' ? 'animate-spin' : ''}`}>
@@ -291,9 +304,28 @@
             const [isLoading, setIsLoading] = useState(false); // 送出表單中的讀取狀態
             const [isSyncing, setIsSyncing] = useState(false); // 與後端同步中的狀態
             const [notification, setNotification] = useState(null); // 通知訊息
-            const [isAdmin, setIsAdmin] = useState(false); // 是否為管理者模式
+            const [isAdmin, setIsAdmin] = useState(() => {
+                try {
+                    return localStorage.getItem(ADMIN_LOGIN_STORAGE_KEY) === "true";
+                } catch (e) {
+                    return false;
+                }
+            }); // 是否為管理者模式（可跨瀏覽器重啟記憶）
             const [editingBooking, setEditingBooking] = useState(null); // 當前正在編輯的預約資料
 			const [resourceStatuses, setResourceStatuses] = useState({}); // 紀錄實體資源借用狀態
+            // V2.2：公司共用的資源顯示／隱藏設定，由各分類 Google Sheet / GAS 同步
+            const [hiddenResourceIds, setHiddenResourceIds] = useState([]);
+            const [isVisibilitySyncing, setIsVisibilitySyncing] = useState(false);
+
+            // 管理者報表功能狀態
+            const todayForReport = formatDate(new Date());
+            const firstDayOfCurrentMonth = `${todayForReport.slice(0, 7)}-01`;
+            const [reportForm, setReportForm] = useState({
+                resourceId: RESOURCES['room'][0].id,
+                startDate: firstDayOfCurrentMonth,
+                endDate: todayForReport
+            });
+            const [isReportLoading, setIsReportLoading] = useState(false);
 
             // 預約表單狀態
             const [formData, setFormData] = useState({
@@ -310,24 +342,153 @@
 				syncProjectId: '' // 案名ID
             });
 
+            // --- 資源顯示/隱藏處理 ---
+            const isResourceHidden = useCallback(
+                (resId) => hiddenResourceIds.includes(resId),
+                [hiddenResourceIds]
+            );
+
+            const getDisplayResources = useCallback((categoryId) => {
+                const all = RESOURCES[categoryId] || [];
+                return all.filter(res => !isResourceHidden(res.id));
+            }, [isResourceHidden]);
+
+            // 從各分類 GAS 讀取公司共用 visibility；某一分類讀取失敗時保留該分類現況，避免誤把隱藏資源恢復顯示。
+            const fetchVisibilitySettings = useCallback(async (categoryIds = null) => {
+                const targets = categoryIds || CATEGORIES.map(c => c.id);
+                setIsVisibilitySyncing(true);
+
+                try {
+                    await Promise.all(targets.map(async categoryId => {
+                        const url = SCRIPT_URLS[categoryId];
+                        if (!url) return;
+
+                        try {
+                            const response = await fetch(`${url}?type=visibility`);
+                            const data = await response.json();
+                            const visibilityData = (data && typeof data === 'object' && !Array.isArray(data)) ? data : {};
+                            const categoryResourceIds = (RESOURCES[categoryId] || []).map(r => r.id);
+                            const categoryHiddenIds = categoryResourceIds.filter(
+                                id => visibilityData[id] === 'hidden'
+                            );
+
+                            setHiddenResourceIds(prev => {
+                                const preserved = prev.filter(id => !categoryResourceIds.includes(id));
+                                return [...preserved, ...categoryHiddenIds];
+                            });
+                        } catch (error) {
+                            console.error(`無法同步 ${categoryId} 資源顯示設定:`, error);
+                        }
+                    }));
+                } finally {
+                    setIsVisibilitySyncing(false);
+                }
+            }, []);
+
+            // 啟動時讀取；之後每分鐘同步一次，讓其他電腦的管理者異動可自動反映。
+            useEffect(() => {
+                fetchVisibilitySettings();
+                const visibilityInterval = setInterval(() => fetchVisibilitySettings(), 60000);
+                return () => clearInterval(visibilityInterval);
+            }, [fetchVisibilitySettings]);
+
             // --- 通知處理 ---
             const showNotification = useCallback((message, type = 'success') => {
                 setNotification({ message, type });
                 setTimeout(() => setNotification(null), 4000);
             }, []);
+
+            const toggleResourceVisibility = async (resId) => {
+                if (!isAdmin) {
+                    showNotification("權限不足：僅限管理者調整資源顯示狀態", "error");
+                    return;
+                }
+
+                const category = CATEGORIES.find(c =>
+                    (RESOURCES[c.id] || []).some(res => res.id === resId)
+                );
+                if (!category || !SCRIPT_URLS[category.id]) {
+                    showNotification("找不到此資源所屬的後端設定", "error");
+                    return;
+                }
+
+                const wasHidden = isResourceHidden(resId);
+                const newVisibility = wasHidden ? 'visible' : 'hidden';
+
+                // 先更新畫面，後續再從 GAS 回讀確認公司共用狀態
+                setHiddenResourceIds(prev =>
+                    newVisibility === 'hidden'
+                        ? (prev.includes(resId) ? prev : [...prev, resId])
+                        : prev.filter(id => id !== resId)
+                );
+
+                try {
+                    await fetch(SCRIPT_URLS[category.id], {
+                        method: 'POST',
+                        mode: 'no-cors',
+                        body: JSON.stringify({
+                            action: 'updateVisibility',
+                            data: {
+                                resourceId: resId,
+                                visibility: newVisibility
+                            }
+                        })
+                    });
+
+                    showNotification(
+                        newVisibility === 'hidden'
+                            ? "已隱藏此資源，公司所有使用者將同步套用"
+                            : "已恢復顯示此資源，公司所有使用者將同步套用"
+                    );
+
+                    // no-cors 無法直接讀取 POST 回應；稍後以 GET 回讀確認。
+                    setTimeout(() => fetchVisibilitySettings([category.id]), 800);
+                } catch (error) {
+                    // 網路層失敗才還原；後端結果則由下一次 GET 同步校正。
+                    setHiddenResourceIds(prev =>
+                        wasHidden
+                            ? (prev.includes(resId) ? prev : [...prev, resId])
+                            : prev.filter(id => id !== resId)
+                    );
+                    showNotification("資源顯示設定同步失敗，請檢查網路", "error");
+                }
+            };
 						   
             // 切換頁籤
             const handleCategoryChange = (categoryId) => {
                 if (activeCategory === categoryId) return;
                 setActiveCategory(categoryId);
+                fetchVisibilitySettings([categoryId]);
                 setBookings([]); // 清空舊資料顯示讀取中
+                const nextResources = getDisplayResources(categoryId);
                 setFormData(prev => ({
                     ...prev,
-                    resourceId: RESOURCES[categoryId][0].id,
+                    resourceId: nextResources.length > 0 ? nextResources[0].id : '',
                     title: '',
                     user: ''
                 }));
             };
+
+            // 若由瀏覽器記憶自動恢復管理者模式，報表迄日同步更新為當日
+            useEffect(() => {
+                if (isAdmin) {
+                    setReportForm(prev => ({ ...prev, endDate: formatDate(new Date()) }));
+                }
+            }, []);
+
+            // 當切換分類或公司共用顯示設定更新時，自動修正預約下拉選單
+            useEffect(() => {
+                const displayResources = getDisplayResources(activeCategory);
+                if (displayResources.length === 0) {
+                    if (formData.resourceId !== '') {
+                        setFormData(prev => ({ ...prev, resourceId: '' }));
+                    }
+                    return;
+                }
+                if (!displayResources.some(res => res.id === formData.resourceId)) {
+                    setFormData(prev => ({ ...prev, resourceId: displayResources[0].id }));
+                }
+            }, [activeCategory, hiddenResourceIds]);
 
             // ============================================================
             // 4. API 通訊 (Data Synchronization)
@@ -403,18 +564,159 @@
             const goToCurrent = () => setSelectedDate(formatDate(new Date()));
 
             // 管理者登入邏輯
+            // 驗證成功後只記錄登入狀態，不儲存管理者密碼。
+            // 登入狀態會保留至管理者主動登出。
             const toggleAdmin = () => {
                 if (isAdmin) {
                     setIsAdmin(false);
+                    try {
+                        localStorage.removeItem(ADMIN_LOGIN_STORAGE_KEY);
+                    } catch (e) {
+                        console.warn("無法清除管理者登入記憶：", e);
+                    }
                     showNotification("已登出管理者模式");
                 } else {
                     const pwd = prompt("請輸入管理者密碼：");
                     if (pwd === ADMIN_PASSWORD) {
                         setIsAdmin(true);
+                        try {
+                            localStorage.setItem(ADMIN_LOGIN_STORAGE_KEY, "true");
+                        } catch (e) {
+                            console.warn("無法儲存管理者登入記憶：", e);
+                        }
+                        setReportForm(prev => ({ ...prev, endDate: formatDate(new Date()) }));
                         showNotification("已進入管理者模式");
                     } else if (pwd !== null) {
                         showNotification("密碼錯誤", "error");
                     }
+                }
+            };
+
+            // ============================================================
+            // 管理者：輸出指定資源的預約登記報表
+            // ============================================================
+            const getResourceMeta = (resourceId) => {
+                for (const category of CATEGORIES) {
+                    const resource = (RESOURCES[category.id] || []).find(r => r.id === resourceId);
+                    if (resource) return { categoryId: category.id, categoryLabel: category.label, resource };
+                }
+                return null;
+            };
+
+            const escapeCsvCell = (value) => {
+                const text = String(value ?? '').replace(/"/g, '""');
+                return `"${text}"`;
+            };
+
+            const exportReservationReport = async () => {
+                if (!isAdmin) {
+                    showNotification("權限不足：僅限管理者輸出報表", "error");
+                    return;
+                }
+
+                const { resourceId, startDate, endDate } = reportForm;
+                if (!resourceId) {
+                    showNotification("請先選擇要輸出的公司資源", "error");
+                    return;
+                }
+                if (!startDate || !endDate) {
+                    showNotification("請完整指定報表起訖日期", "error");
+                    return;
+                }
+                if (startDate > endDate) {
+                    showNotification("報表起始日期不可晚於結束日期", "error");
+                    return;
+                }
+
+                const meta = getResourceMeta(resourceId);
+                if (!meta) {
+                    showNotification("找不到指定的資源資料", "error");
+                    return;
+                }
+
+                const reportScriptUrl = SCRIPT_URLS[meta.categoryId];
+                if (!reportScriptUrl) {
+                    showNotification(`尚未設定 ${meta.categoryLabel} 的 GAS 網址`, "error");
+                    return;
+                }
+
+                setIsReportLoading(true);
+                try {
+                    const response = await fetch(reportScriptUrl);
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+
+                    const rawData = await response.json();
+                    const dataArray = Array.isArray(rawData)
+                        ? rawData
+                        : (rawData?.data && Array.isArray(rawData.data) ? rawData.data : []);
+
+                    const normalizedData = dataArray.map(item => ({
+                        id: String(item.id || item['編號'] || ''),
+                        resourceId: item.resourceId || item.roomId || item['會議室'] || item['資源'] || '',
+                        date: formatDate(item.date || item['日期']),
+                        startTime: formatTime(item.startTime || item['開始時間']),
+                        endTime: formatTime(item.endTime || item['結束時間']),
+                        title: item.title || item['主題'] || '',
+                        user: item.user || item['預約者'] || ''
+                    }));
+
+                    const reportRows = normalizedData
+                        .filter(item =>
+                            item.resourceId === resourceId &&
+                            item.date >= startDate &&
+                            item.date <= endDate
+                        )
+                        .sort((a, b) => {
+                            const dateCompare = a.date.localeCompare(b.date);
+                            if (dateCompare !== 0) return dateCompare;
+                            return a.startTime.localeCompare(b.startTime);
+                        });
+
+                    if (reportRows.length === 0) {
+                        showNotification("指定期間內無預約紀錄", "error");
+                        return;
+                    }
+
+                    const csvRows = [
+                        ['預約項目', '日期', '預約者'],
+                        ...reportRows.map(row => [
+                            meta.resource.name,
+                            row.date,
+                            row.user
+                        ])
+                    ];
+
+                    const csvContent = csvRows
+                        .map(row => row.map(escapeCsvCell).join(','))
+                        .join('\r\n');
+
+                    // UTF-8 BOM，避免 Windows Excel 開啟中文 CSV 時亂碼
+                    const blob = new Blob(['\uFEFF' + csvContent], {
+                        type: 'text/csv;charset=utf-8;'
+                    });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+
+                    const safeResourceName = meta.resource.name
+                        .replace(/[\\/:*?"<>|]/g, '_')
+                        .replace(/\s+/g, ' ')
+                        .trim();
+
+                    link.href = url;
+                    link.download = `預約登記報表_${safeResourceName}_${startDate.replaceAll('-', '')}-${endDate.replaceAll('-', '')}.csv`;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    URL.revokeObjectURL(url);
+
+                    showNotification(`報表已輸出，共 ${reportRows.length} 筆預約紀錄`);
+                } catch (error) {
+                    console.error("報表輸出失敗:", error);
+                    showNotification("報表資料讀取失敗，請檢查網路或後端連線", "error");
+                } finally {
+                    setIsReportLoading(false);
                 }
             };
 
@@ -461,6 +763,8 @@
             const handleSubmit = async (e) => {
                 e.preventDefault();
                 if(!currentScriptUrl) return showNotification("尚未設定此項目的 GAS 網址", "error");
+                if (!formData.resourceId) return showNotification("目前沒有可預約的資源", "error");
+                if (isResourceHidden(formData.resourceId)) return showNotification("此資源目前暫停預約，請重新選擇其他資源", "error");
                 const { title, user, repeatType, repeatCount, date, startTime, endTime, syncCalendar, syncProjectId } = formData;
                 const trimmedTitle = title.trim();
                 const trimmedUser = user.trim();
@@ -642,7 +946,11 @@
                         {days.map((item, i) => {
                             const isToday = item.dateStr === formatDate(new Date());
                             const isSelected = item.dateStr === selectedDate;
-                            const dayBookings = item.dateStr ? bookings.filter(b => b.date === item.dateStr).sort((a,b) => a.startTime.localeCompare(b.startTime)) : [];
+                            const dayBookings = item.dateStr
+                                ? bookings
+                                    .filter(b => b.date === item.dateStr)
+                                    .sort((a,b) => a.startTime.localeCompare(b.startTime))
+                                : [];
                             
                             return (
                                 <div 
@@ -745,7 +1053,13 @@
                                             {CATEGORIES.find(c => c.id === activeCategory)?.label}預約選項
                                         </label>
                                         <select value={formData.resourceId} onChange={e => setFormData({...formData, resourceId: e.target.value})} className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all">
-                                            {RESOURCES[activeCategory].map(res => <option key={res.id} value={res.id}>{res.name}</option>)}
+                                            {getDisplayResources(activeCategory).length === 0 ? (
+                                                <option value="">目前無可預約資源</option>
+                                            ) : (
+                                                getDisplayResources(activeCategory).map(res => (
+                                                    <option key={res.id} value={res.id}>{res.name}</option>
+                                                ))
+                                            )}
                                         </select>
                                     </div>
                                     <div className="space-y-1.5">
@@ -855,18 +1169,107 @@
                                     </div>
                                     <button 
                                         type="submit" 
-                                        disabled={isLoading} 
-                                        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-4 rounded-xl shadow-lg shadow-blue-200 transition-all active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2 group"
+                                        disabled={isLoading || getDisplayResources(activeCategory).length === 0} 
+                                        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-4 rounded-xl shadow-lg shadow-blue-200 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 group"
                                     >
                                         {isLoading ? <Icon name="loader-2" size={20} /> : (
                                             <>
-                                                <span>{formData.repeatType === 'none' ? '立即預約' : `批次預約登記 (${formData.repeatCount}筆)`}</span>
+                                                <span>
+                                                    {getDisplayResources(activeCategory).length === 0
+                                                        ? '目前無可預約資源'
+                                                        : (formData.repeatType === 'none' ? '立即預約' : `批次預約登記 (${formData.repeatCount}筆)`)}
+                                                </span>
                                                 <Icon name="chevron-right" size={16} className="group-hover:translate-x-1 transition-transform" />
                                             </>
                                         )}
                                     </button>
                                 </form>
                             </div>
+
+                            {/* --- 管理者專用：預約登記報表 --- */}
+                            {isAdmin && (
+                                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+                                    <h3 className="text-sm font-black text-slate-800 mb-6 flex items-center gap-2">
+                                        <span className="w-1 h-5 bg-indigo-600 rounded-full"></span>
+                                        預約登記報表
+                                    </h3>
+
+                                    <div className="space-y-5">
+                                        <div className="space-y-1.5">
+                                            <label className="text-[11px] font-black text-slate-400 uppercase ml-1">
+                                                預約項目
+                                            </label>
+                                            <select
+                                                value={reportForm.resourceId}
+                                                onChange={e => setReportForm({...reportForm, resourceId: e.target.value})}
+                                                className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
+                                            >
+                                                {CATEGORIES.map(category => (
+                                                    <optgroup key={category.id} label={category.label}>
+                                                        {(RESOURCES[category.id] || []).map(res => (
+                                                            <option key={res.id} value={res.id}>
+                                                                {res.name}{isResourceHidden(res.id) ? '（目前隱藏）' : ''}
+                                                            </option>
+                                                        ))}
+                                                    </optgroup>
+                                                ))}
+                                            </select>
+                                        </div>
+
+                                        <div className="grid grid-cols-1 gap-4">
+                                            <div className="space-y-1.5">
+                                                <label className="text-[11px] font-black text-slate-400 uppercase ml-1">
+                                                    起始日期
+                                                </label>
+                                                <input
+                                                    type="date"
+                                                    value={reportForm.startDate}
+                                                    onChange={e => setReportForm({...reportForm, startDate: e.target.value})}
+                                                    className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
+                                                />
+                                            </div>
+
+                                            <div className="space-y-1.5">
+                                                <label className="text-[11px] font-black text-slate-400 uppercase ml-1">
+                                                    結束日期
+                                                </label>
+                                                <input
+                                                    type="date"
+                                                    value={reportForm.endDate}
+                                                    onChange={e => setReportForm({...reportForm, endDate: e.target.value})}
+                                                    className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
+                                                />
+                                                <p className="text-[10px] text-slate-400 font-medium ml-1">
+                                                    預設為本次登入管理者模式當日
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <button
+                                            type="button"
+                                            onClick={exportReservationReport}
+                                            disabled={isReportLoading}
+                                            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-black py-3.5 rounded-xl shadow-lg shadow-indigo-100 transition-all active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2"
+                                        >
+                                            {isReportLoading ? (
+                                                <>
+                                                    <Icon name="loader-2" size={18} />
+                                                    <span>讀取報表資料中...</span>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <Icon name="calendar" size={17} />
+                                                    <span>輸出預約登記報表</span>
+                                                </>
+                                            )}
+                                        </button>
+
+                                        <p className="text-[10px] text-slate-400 leading-relaxed font-medium">
+                                            報表格式：CSV（Excel 可直接開啟），欄位包含「預約項目、日期、預約者」。
+                                        </p>
+                                    </div>
+                                </div>
+                            )}
 
                             {/* --- 更新日誌區 (Logs) --- */}
                             <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
@@ -951,28 +1354,48 @@
                                     {currentScriptUrl && viewMode === 'daily' ? (
                                         /* 日視圖內容：依資源分組 */
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-in fade-in duration-300">
-                                            {RESOURCES[activeCategory].map(res => {
+                                            {RESOURCES[activeCategory]
+                                                .filter(res => isAdmin || !isResourceHidden(res.id) || todaysBookings.some(b => b.resourceId === res.id))
+                                                .map(res => {
                                                 const resBookings = todaysBookings.filter(b => b.resourceId === res.id);
                                                 // 保護屬性讀取避免當機
                                                 const currentStatus = (resourceStatuses || {})[res.id]; 
                                                 return (
-                                                    <div key={res.id} className="bg-slate-50/50 rounded-2xl p-5 border border-slate-100 flex flex-col h-full">
-                                                        <div className="flex items-center justify-between mb-4">
+                                                    <div key={res.id} className={`bg-slate-50/50 rounded-2xl p-5 border flex flex-col h-full ${isAdmin && isResourceHidden(res.id) ? 'border-slate-300 opacity-70' : 'border-slate-100'}`}>
+                                                        <div className="flex items-center justify-between mb-4 gap-3">
                                                             <h3 className={`text-[11px] font-black px-3 py-1 rounded-full border shadow-sm ${res.color}`}>{res.name}</h3>
-															{activeCategory === 'room' ? (
-																<span className="text-[10px] font-bold text-slate-400">{resBookings.length} 筆預約</span>
-															) : (
-																<button
-																	onClick={() => toggleResourceStatus(res.id)}
-																	className={`text-[10px] font-black px-2.5 py-1 rounded-md border transition-all ${
-																		currentStatus === 'borrowed' 
-																			? 'bg-rose-100 text-rose-600 border-rose-200 shadow-sm' 
-																			: 'bg-emerald-100 text-emerald-600 border-emerald-200 shadow-sm'
-																	} ${isAdmin ? 'cursor-pointer hover:scale-105' : 'cursor-default opacity-80'}`}
-																>
-																	{currentStatus === 'borrowed' ? '借用中' : '可借用'}
-																</button>
-															)}                                                        </div>
+                                                            <div className="flex items-center gap-2 shrink-0">
+                                                                {activeCategory === 'room' ? (
+                                                                    <span className="text-[10px] font-bold text-slate-400">{resBookings.length} 筆預約</span>
+                                                                ) : (
+                                                                    <button
+                                                                        onClick={() => toggleResourceStatus(res.id)}
+                                                                        className={`text-[10px] font-black px-2.5 py-1 rounded-md border transition-all ${
+                                                                            currentStatus === 'borrowed'
+                                                                                ? 'bg-rose-100 text-rose-600 border-rose-200 shadow-sm'
+                                                                                : 'bg-emerald-100 text-emerald-600 border-emerald-200 shadow-sm'
+                                                                        } ${isAdmin ? 'cursor-pointer hover:scale-105' : 'cursor-default opacity-80'}`}
+                                                                    >
+                                                                        {currentStatus === 'borrowed' ? '借用中' : '可借用'}
+                                                                    </button>
+                                                                )}
+                                                                {isAdmin && (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => toggleResourceVisibility(res.id)}
+                                                                        title={isResourceHidden(res.id) ? "恢復一般使用者顯示" : "隱藏此資源"}
+                                                                        aria-label={isResourceHidden(res.id) ? "恢復一般使用者顯示" : "隱藏此資源"}
+                                                                        className={`p-1.5 rounded-lg border transition-all ${
+                                                                            isResourceHidden(res.id)
+                                                                                ? 'bg-slate-700 text-white border-slate-700 hover:bg-slate-800'
+                                                                                : 'bg-white text-slate-400 border-slate-200 hover:text-indigo-600 hover:border-indigo-300'
+                                                                        }`}
+                                                                    >
+                                                                        <Icon name={isResourceHidden(res.id) ? "eye-off" : "eye"} size={13} />
+                                                                    </button>
+                                                                )}
+                                                            </div>
+                                                        </div>
                                                         {resBookings.length === 0 ? (
                                                             <div className="flex-1 flex flex-col items-center justify-center py-10 opacity-30">
                                                                 <Icon name={CATEGORIES.find(c => c.id === activeCategory)?.icon || "calendar"} size={32} />
@@ -1066,7 +1489,11 @@
                                     <div className="space-y-1.5">
                                         <label className="text-[11px] font-black text-slate-400 uppercase">預約項目</label>
                                         <select value={editingBooking.resourceId} onChange={e => setEditingBooking({...editingBooking, resourceId: e.target.value})} className="w-full border rounded-xl p-3 text-sm font-bold bg-slate-50 focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all">
-                                            {RESOURCES[activeCategory].map(res => <option key={res.id} value={res.id}>{res.name}</option>)}
+                                            {RESOURCES[activeCategory].map(res => (
+                                                <option key={res.id} value={res.id}>
+                                                    {res.name}{isResourceHidden(res.id) ? '（目前暫停預約）' : ''}
+                                                </option>
+                                            ))}
                                         </select>
                                     </div>
                                     <div className="space-y-1.5">
