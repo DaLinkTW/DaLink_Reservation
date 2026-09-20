@@ -1,1550 +1,1174 @@
-<!DOCTYPE html>
-<html lang="zh-TW">
-<head>
-    <link rel="icon" href="./favicon.ico" type="image/x-icon">
-	<meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>大林聯合建築師事務所 公司資源預約管理系統 V2.2 RC2</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <!-- 將 Babel 版本固定至穩定的 7.23.6 以避免最新版的模組載入錯誤 -->
-    <script src="https://unpkg.com/@babel/standalone@7.23.6/babel.min.js"></script>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap');
+/**
+ * 重要設定提醒：
+ * 1. 請確保 CALENDAR_MAPPING 的 Key (如 "2017-20") 
+ * 與 index.html 中的 MOCK_CASES ID 完全一致。
+ * 2. 必須在 GAS 左側「服務」新增 "Google Calendar API"。
+ * 3. 必須手動設定「觸發器」執行 syncDeletedEvents 函式。
+ */
 
-        body { font-family: 'Noto Sans TC', sans-serif; }
-        .no-scrollbar::-webkit-scrollbar { display: none; }
-        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-        /* 自定義 Slider 樣式 */
-        input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            appearance: none;
-            width: 18px;
-            height: 18px;
-            background: #2563eb;
-            cursor: pointer;
-            border-radius: 50%;
-            border: 2px solid white;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+const SHEET_NAME = "預約資料"; 
+const SHEET_STATUS = "資源狀態"; // 實體借用狀態表
+const SHEET_VISIBILITY = "資源設定"; // V2.2：公司共用資源顯示／隱藏設定
+
+
+// ============================================================
+// V2.2.1 RC3：多人同步 Cache / Lock 共用工具
+// ============================================================
+const RESOURCE_STATE_CACHE_KEY = "rc3_resource_state_v1";
+const RESOURCE_STATE_CACHE_TTL = 3;
+const RESOURCE_STATE_VERSION_PROPERTY = "RC3_RESOURCE_STATE_VERSION";
+const BOOKING_CACHE_META_KEY = "rc3_bookings_meta_v1";
+const BOOKING_CACHE_CHUNK_PREFIX = "rc3_bookings_chunk_v1_";
+const BOOKING_CACHE_BUILDING_KEY = "rc3_bookings_building_v1";
+const BOOKING_VERSION_PROPERTY = "RC3_BOOKING_VERSION";
+const BOOKING_CACHE_TTL = 60;
+const BOOKING_CACHE_CHUNK_MAX_BYTES = 70000;
+
+function makeStateSignature_(status, visibility) {
+  const raw = JSON.stringify({ status: status || {}, visibility: visibility || {} });
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, raw, Utilities.Charset.UTF_8);
+  return Utilities.base64EncodeWebSafe(digest).replace(/=+$/g, "").substring(0, 22);
+}
+
+function bumpResourceStateVersion_() {
+  // 寫入後立即清除快取；version 由實際內容 hash 決定，可偵測人工修改 Sheet。
+  CacheService.getScriptCache().remove(RESOURCE_STATE_CACHE_KEY);
+}
+
+function readStatusObject_(ss) {
+  const result = {};
+  const sheet = ss.getSheetByName(SHEET_STATUS);
+  if (!sheet) return result;
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return result;
+  const data = sheet.getRange(2, 1, lastRow - 1, 2).getValues();
+  for (let i = 0; i < data.length; i++) {
+    const resourceId = String(data[i][0] || "").trim();
+    if (resourceId) result[resourceId] = String(data[i][1] || "available");
+  }
+  return result;
+}
+
+function readVisibilityObject_(ss) {
+  const result = {};
+  const sheet = ss.getSheetByName(SHEET_VISIBILITY);
+  if (!sheet) return result;
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return result;
+  const data = sheet.getRange(2, 1, lastRow - 1, 2).getValues();
+  for (let i = 0; i < data.length; i++) {
+    const resourceId = String(data[i][0] || "").trim();
+    if (resourceId) result[resourceId] = String(data[i][1] || "visible");
+  }
+  return result;
+}
+
+function buildResourceState_(ss) {
+  const status = readStatusObject_(ss);
+  const visibility = readVisibilityObject_(ss);
+  return {
+    version: makeStateSignature_(status, visibility),
+    updatedAt: new Date().toISOString(),
+    status: status,
+    visibility: visibility
+  };
+}
+
+function getResourceStateCached_(ss) {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get(RESOURCE_STATE_CACHE_KEY);
+  if (cached) {
+    try { return JSON.parse(cached); } catch (e) {}
+  }
+
+  // Cache miss 時只允許一個 execution 重建；其他 execution 拿鎖後先重查 cache。
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1500)) {
+    Utilities.sleep(120);
+    const retryCached = cache.get(RESOURCE_STATE_CACHE_KEY);
+    if (retryCached) {
+      try { return JSON.parse(retryCached); } catch (e) {}
+    }
+    return buildResourceState_(ss);
+  }
+
+  try {
+    const cachedAgain = cache.get(RESOURCE_STATE_CACHE_KEY);
+    if (cachedAgain) {
+      try { return JSON.parse(cachedAgain); } catch (e) {}
+    }
+    const state = buildResourceState_(ss);
+    cache.put(RESOURCE_STATE_CACHE_KEY, JSON.stringify(state), RESOURCE_STATE_CACHE_TTL);
+    return state;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function getBookingVersion_() {
+  return PropertiesService.getScriptProperties().getProperty(BOOKING_VERSION_PROPERTY) || "0";
+}
+
+function bumpBookingVersion_() {
+  const version = String(Date.now()) + "-" + Utilities.getUuid().substring(0, 8);
+  PropertiesService.getScriptProperties().setProperty(BOOKING_VERSION_PROPERTY, version);
+  return version;
+}
+
+function getCachedBookings_() {
+  const cache = CacheService.getScriptCache();
+  const metaRaw = cache.get(BOOKING_CACHE_META_KEY);
+  if (!metaRaw) return null;
+
+  let meta;
+  try { meta = JSON.parse(metaRaw); } catch (e) { return null; }
+  if (String(meta.version || "0") !== String(getBookingVersion_())) return null;
+  const count = Number(meta.count || 0);
+  if (count <= 0) return [];
+
+  const keys = [];
+  for (let i = 0; i < count; i++) keys.push(BOOKING_CACHE_CHUNK_PREFIX + i);
+  const values = cache.getAll(keys);
+  const result = [];
+
+  for (let i = 0; i < keys.length; i++) {
+    if (!values[keys[i]]) return null;
+    try {
+      const chunk = JSON.parse(values[keys[i]]);
+      if (!Array.isArray(chunk)) return null;
+      Array.prototype.push.apply(result, chunk);
+    } catch (e) {
+      return null;
+    }
+  }
+  return result;
+}
+
+function putBookingsCache_(bookings, version) {
+  const cache = CacheService.getScriptCache();
+  const chunks = [];
+  let current = [];
+
+  for (let i = 0; i < bookings.length; i++) {
+    const candidate = current.concat([bookings[i]]);
+    const candidateJson = JSON.stringify(candidate);
+    const bytes = Utilities.newBlob(candidateJson).getBytes().length;
+
+    if (current.length > 0 && bytes > BOOKING_CACHE_CHUNK_MAX_BYTES) {
+      chunks.push(JSON.stringify(current));
+      current = [bookings[i]];
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.length > 0) chunks.push(JSON.stringify(current));
+
+  const map = {};
+  for (let i = 0; i < chunks.length; i++) map[BOOKING_CACHE_CHUNK_PREFIX + i] = chunks[i];
+  if (chunks.length > 0) cache.putAll(map, BOOKING_CACHE_TTL);
+  cache.put(BOOKING_CACHE_META_KEY, JSON.stringify({ count: chunks.length, version: String(version || getBookingVersion_()) }), BOOKING_CACHE_TTL);
+}
+
+function invalidateBookingsCache_() {
+  bumpBookingVersion_();
+  const cache = CacheService.getScriptCache();
+  cache.remove(BOOKING_CACHE_META_KEY);
+  cache.remove(BOOKING_CACHE_BUILDING_KEY);
+}
+
+function claimBookingCacheBuilder_() {
+  const cache = CacheService.getScriptCache();
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(300)) return false;
+  try {
+    if (cache.get(BOOKING_CACHE_BUILDING_KEY)) return false;
+    cache.put(BOOKING_CACHE_BUILDING_KEY, "1", 5);
+    return true;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function releaseBookingCacheBuilder_() {
+  CacheService.getScriptCache().remove(BOOKING_CACHE_BUILDING_KEY);
+}
+
+
+const CALENDAR_MAPPING = {
+  "25034": "df2cf1e5c68ddf0d5abfe9d05faddfce957a7bca26fb6c58ce98500eba644cb5@group.calendar.google.com",
+  "25024": "ad60882e995935fd970c56f9dcfeda75a00f037aac698ae3dc7edcb112be8738@group.calendar.google.com",
+  "25012": "3cd9b65f00500e6932ee522479405f5f4c8485d8a57d77d592444f66c6d52c61@group.calendar.google.com",
+  "25008": "cc56c9eeb64a59658cce65c8911bb24d62959ccc9c8bd6b3e5119c4170c621bc@group.calendar.google.com",
+  "25003": "a18c4054af9a80ffc92bf0fb5d4c8399b1906b1e0ba158211f09a878df6a38d9@group.calendar.google.com",
+  "24032": "885b2b97ab94f782f6cc4d2b4c78925466c572401a65c711fa07941ae634ec14@group.calendar.google.com",
+  "24030": "f4ac1f4715f93a4e10797866bc5463970428923c4e9cce319fc731decf8f395d@group.calendar.google.com",
+  "24014": "ff595513ca4e43c4fc91401aba053977e67657b14df6ec138dfbcbd7d23f80f0@group.calendar.google.com",
+  "24009": "35e246a2625367a40fb8f1ff5cd637c825d62a95d96ebe15a3bc1730759b8a47@group.calendar.google.com",
+  "23022": "ea86ab649031bb408e5c7bd82157f31b14c906c36ed01605b6259001c98db310@group.calendar.google.com",  
+  "23021": "ff3808e694fb9fafa03c8262c9cbe213c2ff30e93db92fe3e21bf4c1451a7a03@group.calendar.google.com",
+  "23018": "36a85dbb4a7c7d919a5da515c32a77cd309fdc9019cae2ba9d238ebca6265bb1@group.calendar.google.com",     
+  "23016": "2215351f772cb0489155a0919c08b235c2d709bcafb8bfb4e4bd89ebcd5be152@group.calendar.google.com",  
+  "23012": "d044aba4c1638386193211f888e9ed7dd66d8426019de9688edfb377202f9472@group.calendar.google.com",  
+  "23002": "605b1f46fdf1ef98b811c4424ef97d583e8808089407ba0c9e512fd1d0ea4fbe@group.calendar.google.com",
+  "23001": "348d9a10b92259e9b18f34fb770dcae4e84080f9c5e7ca2875469abdff19414f@group.calendar.google.com",
+  "22030": "7ed4362f627f71663a661acdebc70b6694c8b875d7b90d831ca183d2b20c97d6@group.calendar.google.com",
+  "22019": "09h2cldijaa9n9muebgcvcriek@group.calendar.google.com",
+  "22013": "28b1f1afb2a3283afdfe59d9ad507641af96da3762784155218a8821b18983af@group.calendar.google.com",
+  "22011": "05o8tcq15pnb6hfbjdbim36i44@group.calendar.google.com",
+  "22009": "b3j4kd62l3mobteg99vokl96j4@group.calendar.google.com",       
+  "22005": "ovd4eur19g27eo6gff4q94euko@group.calendar.google.com",
+  "22004": "57477933a99cde9b51e53b5fa997002bf68e79edc7844505c68c69b352ef6ee2@group.calendar.google.com",
+  "22003": "24440ff1961692cf1efe6b7c13fc3cc3a79482513a5c24a9fc86b7534c0cd9d9@group.calendar.google.com", 
+  "21015": "b9lihq9c424jun7keqqap15vbs@group.calendar.google.com",
+  "21007": "9nknodb57vjl3hvhmruj5qc488@group.calendar.google.com",
+  "21005": "l8bl5knv5mgnnadg5o0rjf5l60@group.calendar.google.com",
+  "21003": "5n7utu6glpm3vb6e5m85mur0ik@group.calendar.google.com",
+  "20031": "ppec05lch6a8nk2dug4o4uokkc@group.calendar.google.com", 
+  "20029": "3ton3htf4o120e0tud93327d7o@group.calendar.google.com",
+  "20028": "c22dp9ifcahecod1sh9ktneslk@group.calendar.google.com",  
+  "20007": "c5h844or0rdoeghbpt91ndgo1c@group.calendar.google.com",
+  "20002": "0roqt3sto4r3iatm7p8rpsbobc@group.calendar.google.com",
+  "19035": "qs1i9nbts7tubs7f3l7ea4da68@group.calendar.google.com",
+  "19018": "jpffdhn9eo93n3gaeq48e80le4@group.calendar.google.com",
+  "18027": "66319ha9vbo2u77u6hf9i9o5j0@group.calendar.google.com",
+  "18006": "b09tiko5a7t9g0jj3hjuolpjvg@group.calendar.google.com",
+  "17020": "hqhrau1t54dnjold2oo7pb1fus@group.calendar.google.com",
+  "17019": "k3ghf5ilqidjaho729bk0e4s7c@group.calendar.google.com",    
+  "17018": "f44b4a94cd2fddbef1db3d804d1fa4e62464d03d7d8ffbee6aa7f45035d0333c@group.calendar.google.com",  
+  "17010": "r9maq2cl73h53fo22od56jv3d8@group.calendar.google.com",
+  "Others001": "f9dt9j9h218u5ck0vt04i2e8kk@group.calendar.google.com",
+  "Others002": "3tmm2ap8lt8h6mohodb6auq100@group.calendar.google.com"                               
+};
+
+/**
+ * 處理 GET 請求
+ */
+
+function buildBookingResult_(ss) {
+  let sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_NAME);
+    sheet.appendRow(["編號", "悠遊卡", "日期", "開始時間", "結束時間", "主題", "預約者", "年份", "個案", "eventId"]);
+  }
+  
+  const data = sheet.getDataRange().getValues();
+  const result = [];
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (!row[0]) continue; 
+    
+    let formattedDate = "";
+    try {
+      formattedDate = Utilities.formatDate(new Date(row[2]), "GMT+8", "yyyy-MM-dd");
+    } catch(err) {
+      formattedDate = String(row[2]);
+    }
+
+    result.push({
+      id: String(row[0]),
+      resourceId: String(row[1]),
+      date: formattedDate,
+      startTime: String(row[3]),
+      endTime: String(row[4]),
+      title: String(row[5]),
+      user: String(row[6]),
+      syncYear: String(row[7] || ""),
+      syncProjectId: String(row[8] || ""),
+      eventId: String(row[9] || "")
+    });
+  }
+
+  return result;
+}
+
+function doGet(e) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // V2.2.1 RC4：no-cors POST 操作結果查詢
+  if (e && e.parameter && e.parameter.type === 'operationResult') {
+    const requestId = String(e.parameter.requestId || "").trim();
+    const result = requestId ? rtGetOperationResult_(requestId) : null;
+    return rtJson_(result || { status: 'pending', code: 'PENDING' });
+  }
+
+
+  // V2.2.1 RC3：status + visibility 合併成單一快取 resourceState。
+  // 舊 endpoint 保留相容性，舊版前端仍可正常使用。
+  if (e && e.parameter && e.parameter.type === 'resourceState') {
+    return ContentService
+      .createTextOutput(JSON.stringify(getResourceStateCached_(ss)))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  if (e && e.parameter && e.parameter.type === 'status') {
+    return ContentService
+      .createTextOutput(JSON.stringify(getResourceStateCached_(ss).status || {}))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  if (e && e.parameter && e.parameter.type === 'visibility') {
+    return ContentService
+      .createTextOutput(JSON.stringify(getResourceStateCached_(ss).visibility || {}))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // 預設讀取所有預約資料
+  let cachedBookings = getCachedBookings_();
+  if (cachedBookings !== null) {
+    return ContentService
+      .createTextOutput(JSON.stringify(cachedBookings))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  if (claimBookingCacheBuilder_()) {
+    try {
+      let versionBefore = getBookingVersion_();
+      cachedBookings = buildBookingResult_(ss);
+      let versionAfter = getBookingVersion_();
+
+      // 建 cache 期間若有人新增/刪除，重讀一次，避免把舊快取寫回去。
+      if (versionBefore !== versionAfter) {
+        versionBefore = versionAfter;
+        cachedBookings = buildBookingResult_(ss);
+        versionAfter = getBookingVersion_();
+      }
+
+      if (versionBefore === versionAfter) {
+        putBookingsCache_(cachedBookings, versionAfter);
+      }
+      return ContentService
+        .createTextOutput(JSON.stringify(cachedBookings))
+        .setMimeType(ContentService.MimeType.JSON);
+    } finally {
+      releaseBookingCacheBuilder_();
+    }
+  }
+
+  // 其他 client 正在重建 cache 時短暫等待，避免同時掃描 Sheet。
+  for (let i = 0; i < 8; i++) {
+    Utilities.sleep(250);
+    cachedBookings = getCachedBookings_();
+    if (cachedBookings !== null) {
+      return ContentService
+        .createTextOutput(JSON.stringify(cachedBookings))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
+  // 極端情況 fallback，確保服務仍可用。
+  cachedBookings = buildBookingResult_(ss);
+  return ContentService
+    .createTextOutput(JSON.stringify(cachedBookings))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * 自動同步/檢查已被刪除的日曆事件
+ * 請在 GAS 觸發器中設定此函式執行
+ */
+function syncDeletedEvents() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) return;
+
+  // Calendar API 檢查放在 lock 外，避免長時間阻塞一般預約。
+  const snapshot = sheet.getDataRange().getValues();
+  const candidates = [];
+  for (let i = 1; i < snapshot.length; i++) {
+    const bookingId = String(snapshot[i][0] || "");
+    const syncProjectId = String(snapshot[i][8] || "");
+    const eventIdRaw = String(snapshot[i][9] || "").trim();
+    if (!bookingId || !syncProjectId || !eventIdRaw || !CALENDAR_MAPPING[syncProjectId]) continue;
+    const cleanEventId = eventIdRaw.split('@')[0];
+    if (!checkEventIsReal(CALENDAR_MAPPING[syncProjectId], cleanEventId)) {
+      candidates.push({ id: bookingId, syncProjectId: syncProjectId, eventId: eventIdRaw });
+    }
+  }
+  if (!candidates.length) return;
+
+  const candidateMap = {};
+  candidates.forEach(function(c) { candidateMap[c.id] = c; });
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(RT_BOOKING_LOCK_TIMEOUT_MS)) return;
+  let deletedCount = 0;
+  try {
+    const current = sheet.getDataRange().getValues();
+    for (let i = current.length - 1; i >= 1; i--) {
+      const id = String(current[i][0] || "");
+      const candidate = candidateMap[id];
+      if (!candidate) continue;
+      // 只有當目前 metadata 仍與檢查快照一致時才刪，避免誤刪剛被修改的預約。
+      if (String(current[i][8] || "") === candidate.syncProjectId && String(current[i][9] || "") === candidate.eventId) {
+        sheet.deleteRow(i + 1);
+        deletedCount++;
+      }
+    }
+    if (deletedCount > 0) {
+      SpreadsheetApp.flush();
+      rtInvalidateBookingsCache_();
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * 使用 Calendar 進階服務檢查事件狀態
+ * 必須在 GAS 左側「服務」新增「Google Calendar API」
+ */
+function checkEventIsReal(calendarId, eventId) {
+  try {
+    const event = Calendar.Events.get(calendarId, eventId);
+    // 狀態為 cancelled 代表已刪除
+    return event.status !== 'cancelled';
+  } catch (e) {
+    const errorMsg = e.toString().toLowerCase();
+    // 404 或 410 代表事件徹底消失
+    if (errorMsg.includes("not found") || errorMsg.includes("410") || errorMsg.includes("404")) {
+      return false;
+    }
+    // 其他網路錯誤暫時判定為存在，避免誤刪
+    return true; 
+  }
+}
+
+/**
+ * 處理 POST 請求
+ */
+
+/**
+ * V2.2：判斷資源是否已被管理者設定為隱藏。
+ * 沒有設定時一律視為 visible，以維持向後相容。
+ */
+function isResourceHidden_(ss, resourceId) {
+  if (!resourceId) return false;
+
+  const visibilitySheet = ss.getSheetByName(SHEET_VISIBILITY);
+  if (!visibilitySheet) return false;
+
+  const lastRow = visibilitySheet.getLastRow();
+  if (lastRow < 2) return false;
+
+  const data = visibilitySheet.getRange(2, 1, lastRow - 1, 2).getValues();
+  for (let i = 0; i < data.length; i++) {
+    if (String(data[i][0]) === String(resourceId)) {
+      return String(data[i][1] || "visible") === "hidden";
+    }
+  }
+  return false;
+}
+
+
+// ============================================================
+// V2.2.1 RC4：Reservation Transaction Layer
+// 後端原子化預約、衝突防護、批次一致性與 no-cors 操作結果確認
+// ============================================================
+const RT_OPERATION_RESULT_PREFIX = "rt_operation_result_v1_";
+const RT_OPERATION_RESULT_TTL = 180;
+const RT_BOOKING_LOCK_TIMEOUT_MS = 20000;
+
+function rtJson_(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function rtOperationKey_(requestId) {
+  return RT_OPERATION_RESULT_PREFIX + String(requestId || "");
+}
+
+function rtGetOperationResult_(requestId) {
+  if (!requestId) return null;
+  const raw = CacheService.getScriptCache().get(rtOperationKey_(requestId));
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+
+function rtSaveOperationResult_(requestId, result) {
+  if (!requestId) return result;
+  CacheService.getScriptCache().put(
+    rtOperationKey_(requestId),
+    JSON.stringify(result),
+    RT_OPERATION_RESULT_TTL
+  );
+  return result;
+}
+
+function rtInvalidateBookingsCache_() {
+  if (typeof invalidateBookingsCache_ === 'function') {
+    invalidateBookingsCache_();
+  }
+}
+
+function rtDateString_(value) {
+  if (value === null || value === undefined || value === "") return "";
+  const str = String(value);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+  try {
+    return Utilities.formatDate(new Date(value), "GMT+8", "yyyy-MM-dd");
+  } catch (e) {
+    return str.substring(0, 10);
+  }
+}
+
+function rtTimeString_(value) {
+  if (value === null || value === undefined || value === "") return "";
+  const str = String(value);
+  const match = str.match(/(?:^|T|\s)(\d{1,2}):(\d{2})/);
+  if (match) return String(match[1]).padStart(2, '0') + ':' + match[2];
+  try {
+    return Utilities.formatDate(new Date(value), "GMT+8", "HH:mm");
+  } catch (e) {
+    return str.substring(0, 5);
+  }
+}
+
+function rtNormalizeBooking_(data) {
+  data = data || {};
+  const resourceId = String(data.resourceId || data.roomId || "").trim();
+  const syncCalendar = data.syncCalendar === true || String(data.syncCalendar) === 'true';
+  const syncProjectId = syncCalendar ? String(data.syncProjectId || "").trim() : "";
+  return {
+    id: String(data.id || "").trim(),
+    resourceId: resourceId,
+    roomId: resourceId,
+    date: rtDateString_(data.date),
+    startTime: rtTimeString_(data.startTime),
+    endTime: rtTimeString_(data.endTime),
+    title: String(data.title || "").trim(),
+    user: String(data.user || "").trim(),
+    syncCalendar: syncCalendar,
+    syncYear: syncCalendar ? String(data.syncYear || "").trim() : "",
+    syncProjectId: syncProjectId
+  };
+}
+
+function rtValidateBooking_(booking) {
+  if (!booking.id) return { code: 'INVALID_INPUT', message: '缺少預約編號' };
+  if (!booking.resourceId) return { code: 'INVALID_INPUT', message: '缺少預約資源' };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(booking.date)) return { code: 'INVALID_INPUT', message: '日期格式錯誤' };
+  if (!/^\d{2}:\d{2}$/.test(booking.startTime) || !/^\d{2}:\d{2}$/.test(booking.endTime)) {
+    return { code: 'INVALID_INPUT', message: '時間格式錯誤' };
+  }
+  if (booking.startTime >= booking.endTime) return { code: 'INVALID_INPUT', message: '結束時間必須晚於開始時間' };
+  if (!booking.title) return { code: 'INVALID_INPUT', message: '預約事由不可為空' };
+  if (!booking.user) return { code: 'INVALID_INPUT', message: '預約者不可為空' };
+  if (booking.syncCalendar && booking.syncProjectId && !CALENDAR_MAPPING[booking.syncProjectId]) {
+    return { code: 'INVALID_PROJECT', message: 'Google 日曆專案不存在' };
+  }
+  return null;
+}
+
+function rtRowBooking_(row) {
+  return {
+    id: String(row[0] || ""),
+    resourceId: String(row[1] || ""),
+    date: rtDateString_(row[2]),
+    startTime: rtTimeString_(row[3]),
+    endTime: rtTimeString_(row[4]),
+    title: String(row[5] || ""),
+    user: String(row[6] || ""),
+    syncYear: String(row[7] || ""),
+    syncProjectId: String(row[8] || ""),
+    eventId: String(row[9] || "")
+  };
+}
+
+function rtBookingToRow_(booking, eventId) {
+  return [
+    booking.id,
+    booking.resourceId,
+    booking.date,
+    booking.startTime,
+    booking.endTime,
+    booking.title,
+    booking.user,
+    booking.syncYear || "",
+    booking.syncProjectId || "",
+    String(eventId || "")
+  ];
+}
+
+function rtSameBooking_(existing, booking) {
+  return existing.id === booking.id &&
+    existing.resourceId === booking.resourceId &&
+    existing.date === booking.date &&
+    existing.startTime === booking.startTime &&
+    existing.endTime === booking.endTime &&
+    existing.title === booking.title &&
+    existing.user === booking.user;
+}
+
+function rtOverlap_(a, b) {
+  return a.resourceId === b.resourceId &&
+    a.date === b.date &&
+    a.startTime < b.endTime &&
+    a.endTime > b.startTime;
+}
+
+function rtFindConflict_(rows, booking, excludeId) {
+  for (let i = 1; i < rows.length; i++) {
+    if (!rows[i][0]) continue;
+    const existing = rtRowBooking_(rows[i]);
+    if (excludeId && existing.id === String(excludeId)) continue;
+    if (rtOverlap_(existing, booking)) {
+      return {
+        id: existing.id,
+        resourceId: existing.resourceId,
+        date: existing.date,
+        startTime: existing.startTime,
+        endTime: existing.endTime,
+        title: existing.title,
+        user: existing.user
+      };
+    }
+  }
+  return null;
+}
+
+function rtFindBatchInternalConflict_(bookings) {
+  for (let i = 0; i < bookings.length; i++) {
+    for (let j = i + 1; j < bookings.length; j++) {
+      if (rtOverlap_(bookings[i], bookings[j])) {
+        return { first: bookings[i], second: bookings[j] };
+      }
+    }
+  }
+  return null;
+}
+
+function rtStrictDeleteCalendarEvent_(calendarId, eventId) {
+  if (!calendarId || !eventId) return true;
+  try {
+    const calendar = CalendarApp.getCalendarById(calendarId);
+    if (!calendar) return false;
+    const event = calendar.getEventById(eventId);
+    if (event) event.deleteEvent();
+    return true;
+  } catch (e) {
+    console.error('Calendar delete failed: ' + e.message);
+    return false;
+  }
+}
+
+function rtSetCalendarMetaById_(bookingId, syncYear, syncProjectId, eventId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) return false;
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(RT_BOOKING_LOCK_TIMEOUT_MS)) return false;
+  try {
+    const rows = sheet.getDataRange().getValues();
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i][0]) === String(bookingId)) {
+        sheet.getRange(i + 1, 8, 1, 3).setValues([[
+          String(syncYear || ""),
+          String(syncProjectId || ""),
+          String(eventId || "")
+        ]]);
+        SpreadsheetApp.flush();
+        rtInvalidateBookingsCache_();
+        return true;
+      }
+    }
+    return false;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function rtCalendarForNewBooking_(booking) {
+  if (!booking.syncCalendar || !booking.syncProjectId || !CALENDAR_MAPPING[booking.syncProjectId]) {
+    return { ok: true, eventId: "", warning: null };
+  }
+  try {
+    const eventId = createCalendarEvent(booking);
+    return { ok: true, eventId: String(eventId || ""), warning: null };
+  } catch (e) {
+    return { ok: false, eventId: "", warning: 'Google 日曆建立失敗：' + e.message };
+  }
+}
+
+function rtProcessAddBatch_(ss, payload, requestId) {
+  const rawBookings = Array.isArray(payload.bookings)
+    ? payload.bookings
+    : (payload.data ? [payload.data] : []);
+  const bookings = rawBookings.map(rtNormalizeBooking_);
+
+  if (!bookings.length) {
+    return rtSaveOperationResult_(requestId, { status: 'error', code: 'INVALID_INPUT', message: '沒有可新增的預約資料' });
+  }
+
+  const seenIds = {};
+  for (let i = 0; i < bookings.length; i++) {
+    const error = rtValidateBooking_(bookings[i]);
+    if (error) return rtSaveOperationResult_(requestId, Object.assign({ status: 'error' }, error));
+    if (seenIds[bookings[i].id]) {
+      return rtSaveOperationResult_(requestId, { status: 'error', code: 'DUPLICATE_ID', message: '批次預約包含重複編號' });
+    }
+    seenIds[bookings[i].id] = true;
+  }
+
+  const internalConflict = rtFindBatchInternalConflict_(bookings);
+  if (internalConflict) {
+    return rtSaveOperationResult_(requestId, {
+      status: 'error', code: 'BATCH_INTERNAL_CONFLICT', message: '批次預約內部存在重疊時段',
+      conflict: { date: internalConflict.second.date, startTime: internalConflict.second.startTime, endTime: internalConflict.second.endTime }
+    });
+  }
+
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) return rtSaveOperationResult_(requestId, { status: 'error', code: 'SHEET_NOT_FOUND', message: '找不到預約資料工作表' });
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(RT_BOOKING_LOCK_TIMEOUT_MS)) {
+    return rtSaveOperationResult_(requestId, { status: 'error', code: 'LOCK_TIMEOUT', message: '系統忙碌中，請稍後再試' });
+  }
+
+  let alreadyApplied = false;
+  try {
+    if (requestId) {
+      const completed = rtGetOperationResult_(requestId);
+      if (completed) return completed;
+    }
+
+    for (let i = 0; i < bookings.length; i++) {
+      if (isResourceHidden_(ss, bookings[i].resourceId)) {
+        return rtSaveOperationResult_(requestId, {
+          status: 'error', code: 'RESOURCE_HIDDEN', message: '此資源目前暫停預約', resourceId: bookings[i].resourceId
+        });
+      }
+    }
+
+    const rows = sheet.getDataRange().getValues();
+    const existingById = {};
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][0]) existingById[String(rows[i][0])] = rtRowBooking_(rows[i]);
+    }
+
+    let existingSameCount = 0;
+    for (let i = 0; i < bookings.length; i++) {
+      const existing = existingById[bookings[i].id];
+      if (existing) {
+        if (!rtSameBooking_(existing, bookings[i])) {
+          return rtSaveOperationResult_(requestId, { status: 'error', code: 'DUPLICATE_ID', message: '預約編號已存在且內容不同' });
         }
-    </style>
-</head>
-<body class="bg-slate-50 text-slate-900">
-    <div id="root"></div>
-
-    <script type="text/babel">
-        const { useState, useMemo, useEffect, useCallback } = React;
-
-        // ============================================================
-        // 1. 系統常數設定 (System Configuration)
-        // ============================================================
-        const CURRENT_VERSION = "V2.2";
-        // Google Apps Script 部署網址 (後端 API)
-        const SCRIPT_URLS = {
-            room: "https://script.google.com/macros/s/AKfycbxSAxtLhn-CmHjK7N3J7U-8ernb9CnVYIUArEJmT8VI-Dj82rexMq2E9jl3ZQlBr5DD/exec",
-            equipment: "https://script.google.com/macros/s/AKfycbxmUbGA88opwtUNRE-V0i5fkgAjS_Iuw0YYvtOmsifMrRhb-LleJnPULAMvEkn-V4x-JQ/exec",
-			car: "https://script.google.com/macros/s/AKfycbw-T-wvDqKiSlqRc4rLv2nJZxHRN7ftTBSQp5wy9jth7PrAUZgkMdC2jQTGuSBS05Io/exec",
-            easycard: "https://script.google.com/macros/s/AKfycbwNopOpt0K6Q9N-xGmpWwIxOV8EavwlzwuSQgHOIsO5jqtV0UNno3usD0sL2mjFzbs9/exec",
-			tool:"https://script.google.com/macros/s/AKfycbyKV7VoTf-hu7B_pPBHnFzhd8Eh5UYktcrXKZfSLHdDOPVuyYef4OZavNqzOAnJLhrkNA/exec"
-        };		  
-		
-        const ADMIN_PASSWORD = "admin0408"; 
-        // 管理者登入狀態記憶：只記錄是否已驗證，不儲存密碼
-        const ADMIN_LOGIN_STORAGE_KEY = "company-resource-admin-authenticated";
-
-        // 系統更新日誌內容
-        const VERSION_LOGS = [
-            {
-                version: "V2.2",
-                date: "2026-09-13",
-                features: [
-                    "新增管理者資源顯示／隱藏功能（公司共用同步）",
-                    "新增管理者預約登記報表輸出功能",
-                    "新增管理者登入狀態記憶功能"
-                ]
-            },
-            { 
-                version: "V2.1", 
-                date: "2026-08-06", 
-                features: ["新增設計工具預約功能","修改投影機名稱"] 
-            },
-            { 
-                version: "V2.0", 
-                date: "2026-06-01", 
-                features: ["新增公務車、會議設備、悠遊卡預約功能","開放「會議室」項目修改及刪除權限","管理者名單及項目異動"] 
-            },
-			{ 
-                version: "V1.4.1", 
-                date: "2026-05-04", 
-                features: ["管理者名單異動"] 
-            },		
-            { 			  
-                version: "V1.4", 
-                date: "2026-04-21", 
-                features: ["優化UI設計", "新增同步至Google日曆功能（反向僅有刪除功能，每5分鐘自動偵測）"] 
-            },
-            { 
-                version: "V1.3", 
-                date: "2026-04-10", 
-                features: ["新增系統更新日誌","新增週期性預約功能(每天/每週/每月)", "新增「日/月」切換導覽按鈕"] 
-            }
-        ];
-
-        // 資源類別定義與對應圖示
-        const CATEGORIES = [
-            { id: 'room', label: '會議室', icon: 'calendar' },
-            { id: 'equipment', label: '會議設備', icon: 'monitor' },
-            { id: 'car', label: '公務車', icon: 'car' },
-            { id: 'easycard', label: '公務悠遊卡', icon: 'credit-card' },
-			{ id: 'tool', label: '設計工具', icon: 'build' }
-        ];
-		
-		// 資源類別定義與對應注意事項
-		const CATEGORY_NOTES = {
-			room: "注意事項：請務必先與同仁完成協調，再行異動或取消其已登記預約資料。",
-			equipment: "注意事項：設備借用請愛惜使用，歸還時請確認配件（線材、滑鼠等）是否齊全。",
-			car: "注意事項：用車完畢請務必歸還鑰匙給管理者，如有違規罰單由借用人負責。",
-			easycard: "注意事項：使用完畢請務必歸還給管理者，遺失請立即通知及掛失。",
-			tool: "注意事項：使用完畢請務必歸還給管理者，遺失請立即通知。"
-		};
-
-        // 各類別資源清單設定 (可自行擴充/修改)
-        const RESOURCES = {
-            room: [
-                { id: 'room-a', name: '會議室 901 (中型 10-15人)', color: 'bg-rose-50 border-rose-200 text-rose-700', dot: 'bg-rose-500' },
-                { id: 'room-b', name: '會議室 902 (大型 10-20人)', color: 'bg-amber-50 border-amber-200 text-amber-700', dot: 'bg-amber-500' },
-                { id: 'room-c', name: '會議室 701 (中型 10-15人)', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' },
-                { id: 'room-d', name: '會議室 702 (大型 10-20人)', color: 'bg-emerald-50 border-emerald-200 text-emerald-700', dot: 'bg-emerald-500' },
-                { id: 'room-e', name: '會議室 703 (小型 6-8人)', color: 'bg-violet-50 border-violet-200 text-violet-700', dot: 'bg-violet-500'  },
-                { id: 'room-f', name: '會議室 704 (小型 6-8人)', color: 'bg-purple-50 border-purple-200 text-purple-700', dot: 'bg-purple-500' }
-            ],
-			equipment: [
-                { id: 'eq-a', name: '筆電Dell（藍）─含HDMI線、滑鼠、電源線', color: 'bg-rose-50 border-rose-200 text-rose-700', dot: 'bg-rose-500' },
-                { id: 'eq-b', name: '筆電Dell（銀）─工地長期借用', color: 'bg-slate-100 border-slate-200 text-slate-400', dot: 'bg-slate-400' },
-                { id: 'eq-c', name: '筆電Dell（綠）─含滑鼠、電源線', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' },
-				{ id: 'eq-d', name: '筆電MSI 01──含滑鼠、電源線', color: 'bg-emerald-50 border-emerald-200 text-emerald-700', dot: 'bg-emerald-500' },
-				{ id: 'eq-e', name: '筆電MSI 02──含滑鼠、電源線', color: 'bg-violet-50 border-violet-200 text-violet-700', dot: 'bg-violet-500' },
-				{ id: 'eq-f', name: '筆電Genuine（黑）─含無線滑鼠（注意USB）、電源線', color: 'bg-purple-50 border-purple-200 text-purple-700', dot: 'bg-purple-500' },
-				{ id: 'eq-g', name: '筆電ASUS（黑）─工地長期借用', color: 'bg-slate-100 border-slate-200 text-slate-400', dot: 'bg-slate-400' },
-				{ id: 'eq-h', name: '投影機（小白）─含HDMI線、遙控器、三轉二接頭', color: 'bg-pink-50 border-pink-200 text-pink-700', dot: 'bg-pink-500' },
-				{ id: 'eq-i', name: '投影機（小黑）─含HDMI線、遙控器、三轉二接頭', color: 'bg-teal-50 border-teal-200 text-teal-700', dot: 'bg-teal-500' },
-				{ id: 'eq-j', name: '投影機（大白-競圖用）─含HDMI線、遙控器、三轉二接頭', color: 'bg-fuchsia-50 border-fuchsia-200 text-fuchsia-700', dot: 'bg-fuchsia-500' },
-				{ id: 'eq-k', name: '喇叭', color: 'bg-rose-50 border-rose-200 text-rose-700', dot: 'bg-rose-500' },
-				{ id: 'eq-l', name: '簡報筆', color: 'bg-amber-50 border-amber-200 text-amber-700', dot: 'bg-amber-500' },
-				{ id: 'eq-m', name: '耳機轉接頭A', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' },
-				{ id: 'eq-n', name: '耳機轉接頭B', color: 'bg-emerald-50 border-emerald-200 text-emerald-700', dot: 'bg-emerald-500' },
-				{ id: 'eq-o', name: '延長線', color: 'bg-violet-50 border-violet-200 text-violet-700', dot: 'bg-violet-500' }
-            ],
-            car: [
-                { id: 'car-a', name: '公務車 A (RFG-2000)', color: 'bg-rose-50 border-rose-200 text-rose-700', dot: 'bg-rose-500' }
-            ],
-            easycard: [
-                { id: 'card-a', name: '公務悠遊卡 01', color: 'bg-rose-50 border-rose-200 text-rose-700', dot: 'bg-rose-500' },
-                { id: 'card-c', name: '公務悠遊卡 03', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' },
-				{ id: 'card-d', name: '公務悠遊卡 04', color: 'bg-emerald-50 border-emerald-200 text-emerald-700', dot: 'bg-emerald-500' },
-                { id: 'card-e', name: '公務悠遊卡 05', color: 'bg-violet-50 border-violet-200 text-violet-700', dot: 'bg-violet-500' },
-				{ id: 'card-f', name: '公務悠遊卡 06', color: 'bg-purple-50 border-purple-200 text-purple-700', dot: 'bg-purple-500' }
-            ],
-			tool: [
-                { id: 'tool-a', name: 'PANTONE 色票', color: 'bg-rose-50 border-rose-200 text-rose-700', dot: 'bg-rose-500' },
-                { id: 'tool-b', name: 'BOSCH GLM 40 雷射測距儀', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' }
-            ]
-        };																																	 																												  			  	  
-        // 生成時間下拉選單 (08:00 - 20:30)
-        const generateTimeOptions = () => {
-            const options = [];
-            for (let hour = 8; hour <= 20; hour++) {
-                const hh = String(hour).padStart(2, '0');
-                options.push(`${hh}:00`, `${hh}:30`);
-            }
-            return options;
-        };
-        const TIME_OPTIONS = generateTimeOptions();
-					
-		// Google Calendar 個案分類選單
-		const PROJECTS_DATA = {
-			"2025": [
-				{ id: "25003", name: "臺北市萬華福興社會住宅2區" },
-				{ id: "25008", name: "慶城街都更" },
-				{ id: "25012", name: "新北市新莊塭仔圳社會住宅" },
-				{ id: "25024", name: "桃園市大溪埔頂社會住宅" },
-				{ id: "25034", name: "桃園市中壢中運段社會住宅" }
-			],			
-			"2024": [
-				{ id: "24009", name: "臺北市內湖石壁潭社會住宅" },
-				{ id: "24014", name: "新北市土城、三重青年社會住宅" },
-				{ id: "24030", name: "桃園市中壢內壢段社會住宅" },
-				{ id: "24032", name: "松山國際機場T1航廈補強裝修及設施更新工程" }
-			],
-			"2023": [
-				{ id: "23001", name: "新北市蘆洲光華段青年社會住宅" },
-				{ id: "23002", name: "桃園市埔心、過嶺社會住宅" },
-				{ id: "23012", name: "臺北市凌霄好室社會住宅" },				
-				{ id: "23016", name: "台康生技橋頭科技園區" },
-				{ id: "23018", name: "新北市德穗安居社會住宅" },
-				{ id: "23021", name: "禾聯A7廠辦新建工程" },
-				{ id: "23022", name: "臺北市社子島地區區段徵收" }
-			],
-			"2022": [
-				{ id: "22003", name: "高雄國際機場新航廈工程" },
-				{ id: "22004", name: "富邦承德廠辦" },
-				{ id: "22005", name: "新北市板橋國民第二運動中心" },
-				{ id: "22009", name: "新北市汐止、中和社會住宅" },
-				{ id: "22011", name: "桃園市中壢、龍潭社會住宅" },
-				{ id: "22013", name: "慈濟中壢園區" },
-				{ id: "22019", name: "新北市三重果菜市場案" },
-				{ id: "22030", name: "中國人壽敦北大樓旅館" },
-				{ id: "22031", name: "國衛院高齡醫學研究中心" }			
-			],
-			"2021": [
-				{ id: "21003", name: "疾病管制署實驗室臨時辦公及建置工程" },
-				{ id: "21005", name: "新北市板橋光環段社會住宅" },
-				{ id: "21007", name: "慈濟岡山醫療園區" },
-				{ id: "21015", name: "臺北市南港僑泰興社會住宅" }
-			],
-			"2020": [
-				{ id: "20002", name: "新北市三峽國光社會住宅" },
-				{ id: "20007", name: "臺北市內湖東湖社會住宅" },
-				{ id: "20028", name: "桃園市慈文社會住宅" },
-				{ id: "20029", name: "臺北捷運劍潭站TOD" }
-			],
-			"2019": [
-				{ id: "19018", name: "法務部調查局中和調查園區" },
-				{ id: "19035", name: "新北市新北高工地下停車場" }
-			],
-			"2018": [
-				{ id: "18006", name: "臺北市北投福國社會住宅" },
-				{ id: "18027", name: "高雄捷運凹子底站商業區開發" }
-			],
-			"2017": [
-				{ id: "17010", name: "新北市一新二土社會住宅" },
-				{ id: "17018", name: "臺北市六張犁A、B基地社會住宅" },
-				{ id: "17019", name: "台師大華語國際學舍" },
-				{ id: "17020", name: "中華郵政物流園區" }
-			],
-			"Others": [
-				{ id: "Others001", name: "公司競圖案" },
-				{ id: "Others002", name: "專案管理部" }
-			]
-		};
-		const YEARS = Array.from({length: new Date().getFullYear() - 2016 + 1}, (_, i) => (2016 + i).toString()).reverse();
-
-        // ============================================================
-        // 2. 工具函式 (Utility Functions)
-        // ============================================================
-        
-        // 日期格式化 YYYY-MM-DD
-        const formatDate = (date) => {
-            const d = new Date(date);
-            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-        };
-
-        // 時間格式化處理 (處理從 Sheets 來的不同日期/時間格式)
-        const formatTime = (input) => {
-            if (!input) return "00:00";
-            const str = String(input);
-            if (str.includes('T')) { // 處理 ISO 格式
-                const date = new Date(input);
-                return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
-            }
-            return str;
-        };
-
-        // 圖示組件 (SVG Icons)
-        const Icon = ({ name, size = 18, className = "", isCustom = false }) => {
-            if (isCustom) {
-                return (
-                    <div className={`flex items-center justify-center rounded-lg p-2 ${className}`} style={{ width: size * 2.2, height: size * 2.2 }}>
-                        {/* 將下方的 src 替換為您公司的 LOGO 圖片網址 */}
-                         <img 
-                         src="https://lh3.google.com/u/0/d/1qc-oaNh8kQVx2FrBkUtnd0NTda6ScIDT=w1920-h953-iv2" 
-                         alt="Logo" 
-                         className="w-full h-full object-contain"
-                         onError={(e) => { e.target.src = 'https://via.placeholder.com/40?text=LOGO'; }} 
-                        />
-                    </div>
-                );
-            }
-            const icons = {
-                calendar: <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />,
-                car: <React.Fragment><path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2"/><circle cx="7" cy="17" r="2"/><path d="M9 17h6"/><circle cx="17" cy="17" r="2"/></React.Fragment>,
-                monitor: <React.Fragment><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></React.Fragment>,
-                "credit-card": <React.Fragment><rect width="22" height="14" x="1" y="5" rx="2"/><line x1="1" x2="23" y1="10" y2="10"/></React.Fragment>,
-                build: <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />,
-				cloud: <path d="M17.5 19c3.037 0 5.5-2.463 5.5-5.5 0-2.97-2.354-5.402-5.304-5.494A7 7 0 1 0 5 13.045c0 .015 0 .03.001.045C2.181 13.528 0 15.937 0 18.889c0 3.037 2.463 5.5 5.5 5.5h12z" />,
-                "chevron-left": <polyline points="15 18 9 12 15 6" />,
-                "chevron-right": <polyline points="9 18 15 12 9 6" />,
-                x: <React.Fragment><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></React.Fragment>,
-                "loader-2": <path d="M21 12a9 9 0 1 1-6.219-8.56" />,
-                lock: <React.Fragment><rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></React.Fragment>,
-                unlock: <React.Fragment><rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 9.9-1" /></React.Fragment>,
-                edit: <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />,
-                info: <React.Fragment><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></React.Fragment>,
-                refresh: <React.Fragment><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></React.Fragment>,
-                eye: <React.Fragment><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /></React.Fragment>,
-                "eye-off": <React.Fragment><path d="M3 3l18 18" /><path d="M10.6 10.6a2 2 0 0 0 2.8 2.8" /><path d="M9.9 4.2A10.7 10.7 0 0 1 12 4c6.5 0 10 8 10 8a18.7 18.7 0 0 1-2.1 3.2" /><path d="M6.7 6.7C3.9 8.6 2 12 2 12s3.5 8 10 8a10.9 10.9 0 0 0 5.3-1.4" /></React.Fragment>
-            };
-            return (
-                <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`${className} ${name === 'loader-2' ? 'animate-spin' : ''}`}>
-                    {icons[name] || null}
-                </svg>
-            );
-        };
-
-        // ============================================================
-        // 3. 主程式邏輯 (Main App Component)
-        // ============================================================
-        function App() {
-            // --- 狀態定義 (State) ---
-            const [activeCategory, setActiveCategory] = useState('room'); // 當前頁籤			
-            const [viewMode, setViewMode] = useState('daily'); // 顯示模式：daily (日), monthly (月)														   
-            const [selectedDate, setSelectedDate] = useState(formatDate(new Date())); // 目前選取的日期
-            const [bookings, setBookings] = useState([]); // 全部的預約資料
-            const [isLoading, setIsLoading] = useState(false); // 送出表單中的讀取狀態
-            const [isSyncing, setIsSyncing] = useState(false); // 與後端同步中的狀態
-            const [notification, setNotification] = useState(null); // 通知訊息
-            const [isAdmin, setIsAdmin] = useState(() => {
-                try {
-                    return localStorage.getItem(ADMIN_LOGIN_STORAGE_KEY) === "true";
-                } catch (e) {
-                    return false;
-                }
-            }); // 是否為管理者模式（可跨瀏覽器重啟記憶）
-            const [editingBooking, setEditingBooking] = useState(null); // 當前正在編輯的預約資料
-			const [resourceStatuses, setResourceStatuses] = useState({}); // 紀錄實體資源借用狀態
-            // V2.2：公司共用的資源顯示／隱藏設定，由各分類 Google Sheet / GAS 同步
-            const [hiddenResourceIds, setHiddenResourceIds] = useState([]);
-            const [isVisibilitySyncing, setIsVisibilitySyncing] = useState(false);
-
-            // 管理者報表功能狀態
-            const todayForReport = formatDate(new Date());
-            const firstDayOfCurrentMonth = `${todayForReport.slice(0, 7)}-01`;
-            const [reportForm, setReportForm] = useState({
-                resourceId: RESOURCES['room'][0].id,
-                startDate: firstDayOfCurrentMonth,
-                endDate: todayForReport
-            });
-            const [isReportLoading, setIsReportLoading] = useState(false);
-
-            // 預約表單狀態
-            const [formData, setFormData] = useState({
-                resourceId: RESOURCES['room'][0].id,
-                date: formatDate(new Date()),
-                startTime: '09:00',
-                endTime: '10:00',
-                title: '',
-                user: '',
-                repeatType: 'none', // 週期類型：none, daily, weekly, monthly
-                repeatCount: 1,      // 重複次數
-				syncCalendar: false, // 預設不同步
-				syncYear: new Date().getFullYear().toString(), // 預設當年
-				syncProjectId: '' // 案名ID
-            });
-
-            // --- 資源顯示/隱藏處理 ---
-            const isResourceHidden = useCallback(
-                (resId) => hiddenResourceIds.includes(resId),
-                [hiddenResourceIds]
-            );
-
-            const getDisplayResources = useCallback((categoryId) => {
-                const all = RESOURCES[categoryId] || [];
-                return all.filter(res => !isResourceHidden(res.id));
-            }, [isResourceHidden]);
-
-            // 從各分類 GAS 讀取公司共用 visibility；某一分類讀取失敗時保留該分類現況，避免誤把隱藏資源恢復顯示。
-            const fetchVisibilitySettings = useCallback(async (categoryIds = null) => {
-                const targets = categoryIds || CATEGORIES.map(c => c.id);
-                setIsVisibilitySyncing(true);
-
-                try {
-                    await Promise.all(targets.map(async categoryId => {
-                        const url = SCRIPT_URLS[categoryId];
-                        if (!url) return;
-
-                        try {
-                            const response = await fetch(`${url}?type=visibility`);
-                            const data = await response.json();
-                            const visibilityData = (data && typeof data === 'object' && !Array.isArray(data)) ? data : {};
-                            const categoryResourceIds = (RESOURCES[categoryId] || []).map(r => r.id);
-                            const categoryHiddenIds = categoryResourceIds.filter(
-                                id => visibilityData[id] === 'hidden'
-                            );
-
-                            setHiddenResourceIds(prev => {
-                                const preserved = prev.filter(id => !categoryResourceIds.includes(id));
-                                return [...preserved, ...categoryHiddenIds];
-                            });
-                        } catch (error) {
-                            console.error(`無法同步 ${categoryId} 資源顯示設定:`, error);
-                        }
-                    }));
-                } finally {
-                    setIsVisibilitySyncing(false);
-                }
-            }, []);
-
-            // 啟動時讀取；之後每分鐘同步一次，讓其他電腦的管理者異動可自動反映。
-            useEffect(() => {
-                fetchVisibilitySettings();
-                const visibilityInterval = setInterval(() => fetchVisibilitySettings(), 60000);
-                return () => clearInterval(visibilityInterval);
-            }, [fetchVisibilitySettings]);
-
-            // --- 通知處理 ---
-            const showNotification = useCallback((message, type = 'success') => {
-                setNotification({ message, type });
-                setTimeout(() => setNotification(null), 4000);
-            }, []);
-
-            const toggleResourceVisibility = async (resId) => {
-                if (!isAdmin) {
-                    showNotification("權限不足：僅限管理者調整資源顯示狀態", "error");
-                    return;
-                }
-
-                const category = CATEGORIES.find(c =>
-                    (RESOURCES[c.id] || []).some(res => res.id === resId)
-                );
-                if (!category || !SCRIPT_URLS[category.id]) {
-                    showNotification("找不到此資源所屬的後端設定", "error");
-                    return;
-                }
-
-                const wasHidden = isResourceHidden(resId);
-                const newVisibility = wasHidden ? 'visible' : 'hidden';
-
-                // 先更新畫面，後續再從 GAS 回讀確認公司共用狀態
-                setHiddenResourceIds(prev =>
-                    newVisibility === 'hidden'
-                        ? (prev.includes(resId) ? prev : [...prev, resId])
-                        : prev.filter(id => id !== resId)
-                );
-
-                try {
-                    await fetch(SCRIPT_URLS[category.id], {
-                        method: 'POST',
-                        mode: 'no-cors',
-                        body: JSON.stringify({
-                            action: 'updateVisibility',
-                            data: {
-                                resourceId: resId,
-                                visibility: newVisibility
-                            }
-                        })
-                    });
-
-                    showNotification(
-                        newVisibility === 'hidden'
-                            ? "已隱藏此資源，公司所有使用者將同步套用"
-                            : "已恢復顯示此資源，公司所有使用者將同步套用"
-                    );
-
-                    // no-cors 無法直接讀取 POST 回應；稍後以 GET 回讀確認。
-                    setTimeout(() => fetchVisibilitySettings([category.id]), 800);
-                } catch (error) {
-                    // 網路層失敗才還原；後端結果則由下一次 GET 同步校正。
-                    setHiddenResourceIds(prev =>
-                        wasHidden
-                            ? (prev.includes(resId) ? prev : [...prev, resId])
-                            : prev.filter(id => id !== resId)
-                    );
-                    showNotification("資源顯示設定同步失敗，請檢查網路", "error");
-                }
-            };
-						   
-            // 切換頁籤
-            const handleCategoryChange = (categoryId) => {
-                if (activeCategory === categoryId) return;
-                setActiveCategory(categoryId);
-                fetchVisibilitySettings([categoryId]);
-                setBookings([]); // 清空舊資料顯示讀取中
-                const nextResources = getDisplayResources(categoryId);
-                setFormData(prev => ({
-                    ...prev,
-                    resourceId: nextResources.length > 0 ? nextResources[0].id : '',
-                    title: '',
-                    user: ''
-                }));
-            };
-
-            // 若由瀏覽器記憶自動恢復管理者模式，報表迄日同步更新為當日
-            useEffect(() => {
-                if (isAdmin) {
-                    setReportForm(prev => ({ ...prev, endDate: formatDate(new Date()) }));
-                }
-            }, []);
-
-            // 當切換分類或公司共用顯示設定更新時，自動修正預約下拉選單
-            useEffect(() => {
-                const displayResources = getDisplayResources(activeCategory);
-                if (displayResources.length === 0) {
-                    if (formData.resourceId !== '') {
-                        setFormData(prev => ({ ...prev, resourceId: '' }));
-                    }
-                    return;
-                }
-                if (!displayResources.some(res => res.id === formData.resourceId)) {
-                    setFormData(prev => ({ ...prev, resourceId: displayResources[0].id }));
-                }
-            }, [activeCategory, hiddenResourceIds]);
-
-            // ============================================================
-            // 4. API 通訊 (Data Synchronization)
-            // ============================================================
-            const currentScriptUrl = SCRIPT_URLS[activeCategory]; // 從 Google Sheets 抓取資料
-
-            const fetchBookings = async () => {
-                if (!currentScriptUrl) {
-                    setIsSyncing(false);
-                    return; // 如果還沒設定 URL，則不抓取
-                }
-                setIsSyncing(true);
-                try {
-                    const response = await fetch(currentScriptUrl);
-                    const rawData = await response.json();
-                    
-                    // 防呆：確保 rawData 為陣列，避免若 GAS 回傳錯誤物件而導致 rawData.map 拋出錯誤
-                    const dataArray = Array.isArray(rawData) ? rawData : (rawData?.data && Array.isArray(rawData.data) ? rawData.data : []);
-
-                    // 資料標準化，相容原有 roomId 與新的 resourceId
-                    const normalizedData = dataArray.map(item => ({
-                        id: String(item.id || item['編號'] || Math.random()),
-                        resourceId: item.resourceId || item.roomId || item['會議室'] || item['資源'] || RESOURCES[activeCategory][0].id,
-                        date: formatDate(item.date || item['日期']),
-                        startTime: formatTime(item.startTime || item['開始時間']),
-                        endTime: formatTime(item.endTime || item['結束時間']),
-                        title: item.title || item['主題'] || '無標題',
-                        user: item.user || item['預約者'] || '未知'
-                    }));
-                    setBookings(normalizedData);
-                } catch (error) {
-                    showNotification("資料同步失敗，請檢查網路連線", "error");
-                } finally {
-                    setIsSyncing(false);
-                }
-            };
-
-            // 初始化與自動重新整理
-            useEffect(() => {
-                fetchBookings();
-                const interval = setInterval(fetchBookings, 60000); // 每分鐘自動更新
-                return () => clearInterval(interval);
-            }, [activeCategory]); // 當頁籤切換時重新抓取
-
-            // 同步目前資源借還狀態	
-			useEffect(() => {
-				const fetchStatus = async () => {
-					if (!currentScriptUrl) return; // 確保有網址才執行
-					try {
-						const response = await fetch(`${currentScriptUrl}?type=status`);
-						const data = await response.json();
-						// 防呆：確保回傳是個物件，避免若為 null 會導致後續畫面取值拋出 TypeError 讓整個系統當機 (White Screen of Death)
-						setResourceStatuses(data || {}); 
-					} catch (error) {
-						console.error("無法同步資源狀態:", error);
-					}
-				};
-				fetchStatus();
-			}, [currentScriptUrl]);
-						
-            // ============================================================
-            // 5. 事件處理邏輯 (Event Handlers)
-            // ============================================================
-
-            // 切換導覽日期
-            const navigateDate = (direction) => {
-                const d = new Date(selectedDate);
-                if (viewMode === 'daily') d.setDate(d.getDate() + direction);
-                else { d.setMonth(d.getMonth() + direction); d.setDate(1); }
-                setSelectedDate(formatDate(d));
-            };
-
-            const goToCurrent = () => setSelectedDate(formatDate(new Date()));
-
-            // 管理者登入邏輯
-            // 驗證成功後只記錄登入狀態，不儲存管理者密碼。
-            // 登入狀態會保留至管理者主動登出。
-            const toggleAdmin = () => {
-                if (isAdmin) {
-                    setIsAdmin(false);
-                    try {
-                        localStorage.removeItem(ADMIN_LOGIN_STORAGE_KEY);
-                    } catch (e) {
-                        console.warn("無法清除管理者登入記憶：", e);
-                    }
-                    showNotification("已登出管理者模式");
-                } else {
-                    const pwd = prompt("請輸入管理者密碼：");
-                    if (pwd === ADMIN_PASSWORD) {
-                        setIsAdmin(true);
-                        try {
-                            localStorage.setItem(ADMIN_LOGIN_STORAGE_KEY, "true");
-                        } catch (e) {
-                            console.warn("無法儲存管理者登入記憶：", e);
-                        }
-                        setReportForm(prev => ({ ...prev, endDate: formatDate(new Date()) }));
-                        showNotification("已進入管理者模式");
-                    } else if (pwd !== null) {
-                        showNotification("密碼錯誤", "error");
-                    }
-                }
-            };
-
-            // ============================================================
-            // 管理者：輸出指定資源的預約登記報表
-            // ============================================================
-            const getResourceMeta = (resourceId) => {
-                for (const category of CATEGORIES) {
-                    const resource = (RESOURCES[category.id] || []).find(r => r.id === resourceId);
-                    if (resource) return { categoryId: category.id, categoryLabel: category.label, resource };
-                }
-                return null;
-            };
-
-            const escapeCsvCell = (value) => {
-                const text = String(value ?? '').replace(/"/g, '""');
-                return `"${text}"`;
-            };
-
-            const exportReservationReport = async () => {
-                if (!isAdmin) {
-                    showNotification("權限不足：僅限管理者輸出報表", "error");
-                    return;
-                }
-
-                const { resourceId, startDate, endDate } = reportForm;
-                if (!resourceId) {
-                    showNotification("請先選擇要輸出的公司資源", "error");
-                    return;
-                }
-                if (!startDate || !endDate) {
-                    showNotification("請完整指定報表起訖日期", "error");
-                    return;
-                }
-                if (startDate > endDate) {
-                    showNotification("報表起始日期不可晚於結束日期", "error");
-                    return;
-                }
-
-                const meta = getResourceMeta(resourceId);
-                if (!meta) {
-                    showNotification("找不到指定的資源資料", "error");
-                    return;
-                }
-
-                const reportScriptUrl = SCRIPT_URLS[meta.categoryId];
-                if (!reportScriptUrl) {
-                    showNotification(`尚未設定 ${meta.categoryLabel} 的 GAS 網址`, "error");
-                    return;
-                }
-
-                setIsReportLoading(true);
-                try {
-                    const response = await fetch(reportScriptUrl);
-                    if (!response.ok) {
-                        throw new Error(`HTTP ${response.status}`);
-                    }
-
-                    const rawData = await response.json();
-                    const dataArray = Array.isArray(rawData)
-                        ? rawData
-                        : (rawData?.data && Array.isArray(rawData.data) ? rawData.data : []);
-
-                    const normalizedData = dataArray.map(item => ({
-                        id: String(item.id || item['編號'] || ''),
-                        resourceId: item.resourceId || item.roomId || item['會議室'] || item['資源'] || '',
-                        date: formatDate(item.date || item['日期']),
-                        startTime: formatTime(item.startTime || item['開始時間']),
-                        endTime: formatTime(item.endTime || item['結束時間']),
-                        title: item.title || item['主題'] || '',
-                        user: item.user || item['預約者'] || ''
-                    }));
-
-                    const reportRows = normalizedData
-                        .filter(item =>
-                            item.resourceId === resourceId &&
-                            item.date >= startDate &&
-                            item.date <= endDate
-                        )
-                        .sort((a, b) => {
-                            const dateCompare = a.date.localeCompare(b.date);
-                            if (dateCompare !== 0) return dateCompare;
-                            return a.startTime.localeCompare(b.startTime);
-                        });
-
-                    if (reportRows.length === 0) {
-                        showNotification("指定期間內無預約紀錄", "error");
-                        return;
-                    }
-
-                    const csvRows = [
-                        ['預約項目', '日期', '預約者'],
-                        ...reportRows.map(row => [
-                            meta.resource.name,
-                            row.date,
-                            row.user
-                        ])
-                    ];
-
-                    const csvContent = csvRows
-                        .map(row => row.map(escapeCsvCell).join(','))
-                        .join('\r\n');
-
-                    // UTF-8 BOM，避免 Windows Excel 開啟中文 CSV 時亂碼
-                    const blob = new Blob(['\uFEFF' + csvContent], {
-                        type: 'text/csv;charset=utf-8;'
-                    });
-                    const url = URL.createObjectURL(blob);
-                    const link = document.createElement('a');
-
-                    const safeResourceName = meta.resource.name
-                        .replace(/[\\/:*?"<>|]/g, '_')
-                        .replace(/\s+/g, ' ')
-                        .trim();
-
-                    link.href = url;
-                    link.download = `預約登記報表_${safeResourceName}_${startDate.replaceAll('-', '')}-${endDate.replaceAll('-', '')}.csv`;
-                    document.body.appendChild(link);
-                    link.click();
-                    document.body.removeChild(link);
-                    URL.revokeObjectURL(url);
-
-                    showNotification(`報表已輸出，共 ${reportRows.length} 筆預約紀錄`);
-                } catch (error) {
-                    console.error("報表輸出失敗:", error);
-                    showNotification("報表資料讀取失敗，請檢查網路或後端連線", "error");
-                } finally {
-                    setIsReportLoading(false);
-                }
-            };
-
-            // 衝突檢測邏輯：判斷同一會議室同一天，時間是否有重疊
-            const checkConflict = (targetBooking, excludeId = null) => {
-                const start = targetBooking.startTime;
-                const end = targetBooking.endTime;
-                const conflicts = bookings.filter(b => 
-                    b.id !== excludeId &&
-                    b.date === targetBooking.date && 
-                    b.resourceId === targetBooking.resourceId &&
-                    start < b.endTime && end > b.startTime
-                );
-                return conflicts.length > 0 ? conflicts[0] : null;
-            };
-
-            // 時間選擇邏輯優化：確保結束時間永遠大於開始時間
-            const handleStartTimeChange = (newStartTime, isEdit = false) => {
-                const target = isEdit ? editingBooking : formData;
-                const setter = isEdit ? setEditingBooking : setFormData;
-                let newEndTime = target.endTime;
-                const startIdx = TIME_OPTIONS.indexOf(newStartTime);
-                const endIdx = TIME_OPTIONS.indexOf(target.endTime);
-                
-                if (startIdx >= endIdx) {
-                    // 自動設定結束時間為開始時間後 1 小時 (2格)
-                    newEndTime = TIME_OPTIONS[startIdx + 2] || TIME_OPTIONS[startIdx + 1] || newStartTime;
-                }
-                setter({ ...target, startTime: newStartTime, endTime: newEndTime });
-            };
-
-            const handleEndTimeChange = (newEndTime, isEdit = false) => {
-                const target = isEdit ? editingBooking : formData;
-                const setter = isEdit ? setEditingBooking : setFormData;
-                if (newEndTime <= target.startTime) {
-                    showNotification("結束時間必須晚於開始時間", "error");
-                    const idx = TIME_OPTIONS.indexOf(target.startTime);
-                    newEndTime = TIME_OPTIONS[idx + 2] || TIME_OPTIONS[idx + 1] || target.startTime;
-                }
-                setter({ ...target, endTime: newEndTime });
-            };
-
-            // 送出新預約 (包含週期性處理)
-            const handleSubmit = async (e) => {
-                e.preventDefault();
-                if(!currentScriptUrl) return showNotification("尚未設定此項目的 GAS 網址", "error");
-                if (!formData.resourceId) return showNotification("目前沒有可預約的資源", "error");
-                if (isResourceHidden(formData.resourceId)) return showNotification("此資源目前暫停預約，請重新選擇其他資源", "error");
-                const { title, user, repeatType, repeatCount, date, startTime, endTime, syncCalendar, syncProjectId } = formData;
-                const trimmedTitle = title.trim();
-                const trimmedUser = user.trim();
-
-                if (!trimmedTitle || !trimmedUser) return showNotification("請填寫主題與預約者", "error");
-                if (startTime >= endTime) return showNotification("結束時間必須大於開始時間", "error");
-
-                // 計算所有需要預約的日期
-                const bookingDates = [];
-                let current = new Date(date);
-                const count = repeatType === 'none' ? 1 : repeatCount;
-                
-                for (let i = 0; i < count; i++) {
-                    bookingDates.push(formatDate(current));
-                    if (repeatType === 'daily') current.setDate(current.getDate() + 1);
-                    else if (repeatType === 'weekly') current.setDate(current.getDate() + 7);
-                    else if (repeatType === 'monthly') current.setMonth(current.getMonth() + 1);
-                }
-
-                // 批次檢核衝突
-                const newBookingsToSubmit = [];
-                for (const d of bookingDates) {
-                    const tempBooking = { 
-					...formData, 
-					date: d, 
-					title: trimmedTitle, 
-					user: trimmedUser, 
-					syncCalendar: syncCalendar, // 傳送同步標記
-                    roomId: formData.resourceId, // 保持向後相容舊 GAS
-					id: `${Date.now()}-${Math.random()}` };
-                    const conflict = checkConflict(tempBooking);
-                    if (conflict) return showNotification(`日期 ${d} 時段衝突：[${conflict.startTime}-${conflict.endTime}] ${conflict.title}`, "error");
-                    newBookingsToSubmit.push(tempBooking);
-                }
-
-                setIsLoading(true);
-                try {
-                    // 迴圈送出請求至 GAS (Action: add)
-                    for (const b of newBookingsToSubmit) {
-                        await fetch(currentScriptUrl, { 
-                            method: 'POST', 
-                            mode: 'no-cors',
-                            body: JSON.stringify({ action: 'add', data: b }) 
-                        });
-                    }
-                    showNotification(`預約成功！共 ${newBookingsToSubmit.length} 筆`);
-                    setTimeout(fetchBookings, 1000);
-                    setFormData(prev => ({ ...prev, title: '', user: '', repeatType: 'none', repeatCount: 1 }));
-                } catch (error) { 
-                    showNotification('連線失敗', 'error'); 
-                } finally { 
-                    setIsLoading(false); 
-                }
-            };
-
-            // 更新既有預約 (刪除舊的 + 新增新的)
-            const handleUpdate = async () => {
-                if (!editingBooking) return;
-				
-                // 權限防呆安全盾：若不是會議室 (room) 且不是管理員，則中斷
-                if (activeCategory !== 'room' && !isAdmin) {
-                    showNotification("安全限制：此項目僅限管理員進行修改", "error");
-                    return;
-                }
-				
-                const trimmedTitle = (editingBooking.title || '').trim();
-                const trimmedUser = (editingBooking.user || '').trim();
-                if (!trimmedTitle || !trimmedUser) return showNotification("欄位不可為空", "error");
-                if (editingBooking.startTime >= editingBooking.endTime) return showNotification("結束時間必須大於開始時間", "error");
-                const conflict = checkConflict(editingBooking, editingBooking.id);
-                if (conflict) return showNotification(`修改衝突：[${conflict.startTime}-${conflict.endTime}] ${conflict.title}`, "error");
-
-                // 保持向後相容
-                const payload = { ...editingBooking, roomId: editingBooking.resourceId };
-
-                setIsLoading(true);
-                try {
-                    // 先刪後加，確保 Sheets 中 ID 維持一致且資料更新
-                    await fetch(currentScriptUrl, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ action: 'delete', id: String(editingBooking.id) }) });
-                    await fetch(currentScriptUrl, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ action: 'add', data: payload }) });
-                    showNotification('資料已修改');
-                    setEditingBooking(null);
-                    setTimeout(fetchBookings, 1000);
-                } catch (error) { showNotification('更新失敗', 'error'); } finally { setIsLoading(false); }
-            };
-
-            // 刪除預約 (僅限管理者)
-            const handleDelete = async (id) => {
-			
-                // 權限檢查：非會議室項目且非管理員
-                if (activeCategory !== 'room' && !isAdmin) {
-                    showNotification("權限不足：此項目僅限管理員進行刪除", "error");
-                    return;
-                }
-                			
-                if (!confirm("確定要刪除這筆預約嗎？")) return;
-                setIsSyncing(true);
-                try {
-                    await fetch(currentScriptUrl, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ action: 'delete', id: String(id) }) });
-                    setTimeout(fetchBookings, 1000);
-                    showNotification('已刪除');
-                } catch (error) { showNotification('刪除失敗', 'error'); setIsSyncing(false); }
-            };
-			
-			// 切換實體資源借用狀態
-			const toggleResourceStatus = async (resId) => {
-				if (!isAdmin) {
-					showNotification("權限不足：僅限管理者可切換借出/歸還狀態", "error");
-					return;
-				}
-
-				// 判斷新的狀態是什麼 (防呆處理，確保 resourceStatuses 不為空)
-				const currentStatus = (resourceStatuses || {})[resId];
-				const newStatus = currentStatus === 'borrowed' ? 'available' : 'borrowed';
-
-				// 先更新前端畫面，讓使用者感覺操作順暢
-				setResourceStatuses(prev => ({
-					...(prev || {}),
-					[resId]: newStatus
-				}));
-
-				// 狀態送到後端 GAS 儲存
-				try {
-					await fetch(currentScriptUrl, {
-						method: 'POST',
-						mode: 'no-cors',
-						body: JSON.stringify({ 
-							action: 'updateStatus', 
-							data: { 
-								resourceId: resId, 
-								status: newStatus 
-							} 
-						})
-					});
-					showNotification("資源借用狀態已更新至資料庫");
-				} catch (error) {
-					// 如果 API 失敗，將畫面狀態還原
-					setResourceStatuses(prev => ({
-						...(prev || {}),
-						[resId]: currentStatus
-					}));
-					showNotification("同步至資料庫失敗，請檢查網路", "error");
-				}
-			};
-	
-            // ============================================================
-            // 6. 介面渲染 (View Rendering)
-            // ============================================================
-
-            // 計算目前選取日期的預約
-            const todaysBookings = useMemo(() => {
-                return bookings.filter(b => b.date === selectedDate).sort((a, b) => a.startTime.localeCompare(b.startTime));
-            }, [bookings, selectedDate]);
-
-            // 渲染月曆核心組件
-            const renderMonthCalendar = () => {
-                const baseDate = new Date(selectedDate);
-                const year = baseDate.getFullYear();
-                const month = baseDate.getMonth();
-                const daysInMonth = new Date(year, month + 1, 0).getDate();
-                const firstDay = new Date(year, month, 1).getDay();
-                
-                const days = [];
-                // 補齊月初空白
-                for (let i = 0; i < firstDay; i++) {
-                    days.push({ day: null, dateStr: null });
-                }
-                // 填充當月日期
-                for (let d = 1; d <= daysInMonth; d++) {
-                    const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-                    days.push({ day: d, dateStr });
-                }
-
-                return (
-                    <div className="grid grid-cols-7 gap-px bg-slate-200 border rounded-xl overflow-hidden shadow-inner">
-                        {['日','一','二','三','四','五','六'].map(d => (
-                            <div key={d} className="bg-slate-50 py-3 text-center font-bold text-slate-400 text-xs uppercase tracking-wider">{d}</div>
-                        ))}
-                        {days.map((item, i) => {
-                            const isToday = item.dateStr === formatDate(new Date());
-                            const isSelected = item.dateStr === selectedDate;
-                            const dayBookings = item.dateStr
-                                ? bookings
-                                    .filter(b => b.date === item.dateStr)
-                                    .sort((a,b) => a.startTime.localeCompare(b.startTime))
-                                : [];
-                            
-                            return (
-                                <div 
-                                    key={i} 
-                                    onClick={() => {
-                                        if (item.dateStr) {
-                                            setSelectedDate(item.dateStr);
-                                            setViewMode('daily');
-                                        }
-                                    }}
-                                    className={`bg-white min-h-[100px] md:min-h-[120px] p-2 border-t border-r border-slate-100 relative transition-all cursor-pointer hover:bg-blue-50 group flex flex-col ${!item.day ? 'bg-slate-50/50' : ''}`}
-                                >
-                                    {item.day && (
-                                        <>
-                                            <span className={`text-xs font-bold w-7 h-7 flex items-center justify-center rounded-full shrink-0 transition-colors ${isToday ? 'bg-blue-600 text-white shadow-md' : 'text-slate-500 group-hover:text-blue-600'} ${isSelected ? 'ring-2 ring-blue-400 ring-offset-1' : ''}`}>
-                                                {item.day}
-                                            </span>
-                                            <div className="flex-1 w-full overflow-y-auto no-scrollbar space-y-1 mt-2">
-                                                {dayBookings.slice(0, 4).map(b => {
-													const res = RESOURCES[activeCategory].find(r => r.id === b.resourceId);
-													let shortName = '';
-													if (res) {
-														if (activeCategory === 'room') {
-															shortName = res.name.replace(/會議室\s*/, '').split(' ')[0];
-														} else if (activeCategory === 'car') {
-															const match = res.name.match(/\((.*?)\)/);
-															shortName = match ? match[1] : res.name.split(' ')[1];
-														} else if (activeCategory === 'equipment') {
-															shortName = res.name.split('（')[0].split('─')[0];
-														} else if (activeCategory === 'easycard') {
-															shortName = res.name.replace(/公務悠遊卡\s*/, '');
-														}
-													}
-                                                    return (
-                                                        <div key={b.id} className={`text-[10px] leading-tight px-1.5 py-1 rounded shadow-sm border truncate flex items-center gap-1 ${res ? res.color : 'bg-slate-100'}`}>
-                                                            <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${res?.dot || 'bg-slate-400'}`}></div>
-                                                            <span className="font-bold">{shortName}</span> {b.startTime}-{b.endTime}
-                                                        </div>
-                                                    );
-                                                })}
-                                                {dayBookings.length > 4 && (
-                                                    <div className="text-[9px] text-slate-400 text-center font-bold">+ {dayBookings.length - 4} 更多</div>
-                                                )}
-                                            </div>
-                                        </>
-                                    )}
-                                </div>
-                            );
-                        })}
-                    </div>
-                );
-            };
-
-            const currentDisplayHeader = useMemo(() => {
-                const d = new Date(selectedDate);
-                return viewMode === 'daily' ? selectedDate : `${d.getFullYear()}年 ${d.getMonth() + 1}月`;
-            }, [selectedDate, viewMode]);
-
-            return (
-                <div className="min-h-screen p-4 md:p-8 flex flex-col max-w-7xl mx-auto w-full">
-                    {/* --- 頂部標題區 (Header) --- */}
-                    <header className="mb-8 flex flex-col md:flex-row justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-200 gap-6">
-                        <div className="flex items-center gap-5 w-full md:w-auto">
-                            <Icon name="calendar" size={70} isCustom={true} />
-                            <div>
-                                <h1 className="text-xl md:text-2xl font-black text-slate-800 tracking-tight">大林聯合建築師事務所</h1>
-                                <div className="flex items-center gap-3 mt-1">
-                                    <span className="bg-blue-100 text-blue-700 text-[10px] font-black px-2 py-0.5 rounded uppercase tracking-widest">{CURRENT_VERSION}</span>
-                                    <h2 className="text-slate-500 text-sm md:text-base font-medium">公司資源預約管理系統</h2>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="flex flex-wrap items-center justify-center gap-4">
-                            {/* 連線狀態指示 */}
-                            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-bold transition-colors ${isSyncing ? 'bg-amber-50 text-amber-600 border-amber-200' : currentScriptUrl ? 'bg-emerald-50 text-emerald-600 border-emerald-200' : 'bg-rose-50 text-rose-600 border-rose-200'}`}>
-                                <Icon name={isSyncing ? "loader-2" : "cloud"} size={14} />
-                                <span>{!currentScriptUrl ? "未設定網址" : isSyncing ? "同步中..." : "雲端連線正常"}</span>
-                            </div>
-                            {/* 管理者登入開關 */}
-                            <button onClick={toggleAdmin} className={`flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm border ${isAdmin ? 'bg-indigo-600 text-white border-indigo-700' : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-400'}`}>
-                                <Icon name={isAdmin ? "unlock" : "lock"} size={14} />
-                                {isAdmin ? "管理者模式" : "管理員登入"}
-                            </button>
-                        </div>
-                    </header>
-
-                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-                        {/* --- 左側欄位：預約表單與公告 (Sidebar) --- */}
-                        <aside className="lg:col-span-4 xl:col-span-3 space-y-6">
-                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-                                <h3 className="text-sm font-black text-slate-800 mb-6 flex items-center gap-2">
-                                    <span className="w-1 h-5 bg-blue-600 rounded-full"></span>
-                                    預約登記表
-                                </h3>
-                                <form onSubmit={handleSubmit} className="space-y-5">
-                                    {/* 資源選擇 (動態切換) */}
-                                    <div className="space-y-1.5">
-                                        <label className="text-[11px] font-black text-slate-400 uppercase ml-1">
-                                            {CATEGORIES.find(c => c.id === activeCategory)?.label}預約選項
-                                        </label>
-                                        <select value={formData.resourceId} onChange={e => setFormData({...formData, resourceId: e.target.value})} className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all">
-                                            {getDisplayResources(activeCategory).length === 0 ? (
-                                                <option value="">目前無可預約資源</option>
-                                            ) : (
-                                                getDisplayResources(activeCategory).map(res => (
-                                                    <option key={res.id} value={res.id}>{res.name}</option>
-                                                ))
-                                            )}
-                                        </select>
-                                    </div>
-                                    <div className="space-y-1.5">
-                                        <label className="text-[11px] font-black text-slate-400 uppercase ml-1">預約日期</label>
-                                        <input type="date" value={formData.date} onChange={e => {setFormData({...formData, date: e.target.value}); setSelectedDate(e.target.value);}} className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all" />
-                                    </div>
-                                    {/* 時間區間 */}
-                                    <div className="grid grid-cols-2 gap-3">
-                                        <div className="space-y-1.5">
-                                            <label className="text-[11px] font-black text-slate-400 uppercase ml-1">開始時間</label>
-                                            <select value={formData.startTime} onChange={e => handleStartTimeChange(e.target.value)} className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all">
-                                                {TIME_OPTIONS.slice(0, -1).map(time => <option key={time} value={time}>{time}</option>)}
-                                            </select>
-                                        </div>
-                                        <div className="space-y-1.5">
-                                            <label className="text-[11px] font-black text-slate-400 uppercase ml-1">結束時間</label>
-                                            <select value={formData.endTime} onChange={e => handleEndTimeChange(e.target.value)} className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all">
-                                                {TIME_OPTIONS.slice(1).map(time => <option key={time} value={time}>{time}</option>)}
-                                            </select>
-                                        </div>
-                                    </div>
-                                    
-                                    {/* --- 週期功能區區塊 --- */}
-                                    <div className="p-4 bg-blue-50/50 rounded-2xl border border-blue-100 space-y-4">
-                                        <div className="space-y-1.5">
-                                            <label className="text-[11px] font-black text-blue-500 uppercase flex items-center gap-1.5">
-                                                <Icon name="refresh" size={12} /> 重複預約週期
-                                            </label>
-                                            <select value={formData.repeatType} onChange={e => setFormData({...formData, repeatType: e.target.value})} className="w-full rounded-xl border-blue-200 border p-2.5 bg-white text-sm font-bold text-blue-700 outline-none focus:ring-2 focus:ring-blue-500/20 transition-all">
-                                                <option value="none">一次性預約</option>
-                                                <option value="daily">每天重複</option>
-                                                <option value="weekly">每週重複</option>
-                                                <option value="monthly">每月重複</option>
-                                            </select>
-                                        </div>
-                                        {formData.repeatType !== 'none' && (
-                                            <div className="space-y-3 animate-in fade-in slide-in-from-top-2 duration-300">
-                                                <label className="text-[11px] font-black text-blue-500 flex justify-between uppercase">
-                                                    <span>重複次數</span>
-                                                    <span className="bg-blue-600 text-white px-2 py-0.5 rounded text-[10px]">{formData.repeatCount} 次</span>
-                                                </label>
-                                                <input type="range" min="1" max="12" value={formData.repeatCount} onChange={e => setFormData({...formData, repeatCount: parseInt(e.target.value)})} className="w-full h-1.5 bg-blue-200 rounded-lg appearance-none cursor-pointer" />
-                                                <p className="text-[10px] text-blue-400 italic font-medium leading-relaxed">預約範圍將從 {formData.date} 起算連續預約。</p>																																	
-                                            </div>
-                                        )}
-                                    </div>
-
-									{/* --- 同步 Google 日曆功能區 --- */}
-									<div className="p-4 bg-emerald-50/50 rounded-2xl border border-emerald-100 space-y-4 mt-3">
-										<div className="flex items-center justify-between">
-											<label className="text-[11px] font-black text-emerald-600 uppercase flex items-center gap-1.5">
-												<Icon name="calendar" size={12} /> 同步至Google日曆
-											</label>
-											<button 
-												type="button"
-												onClick={() => setFormData({...formData, syncCalendar: !formData.syncCalendar})}
-												className={`w-10 h-5 flex items-center rounded-full p-1 transition-colors ${formData.syncCalendar ? 'bg-emerald-600' : 'bg-slate-300'}`}
-											>
-												<div className={`bg-white w-3 h-3 rounded-full shadow-md transform transition-transform ${formData.syncCalendar ? 'translate-x-5' : 'translate-x-0'}`}></div>
-											</button>
-										</div>
-
-										{formData.syncCalendar && (
-											<div className="space-y-3 animate-in fade-in slide-in-from-top-2 duration-300">
-												{/* 第一層：年份 */}
-												<div className="space-y-1">
-													<label className="text-[10px] font-bold text-emerald-500 ml-1">選擇案號年份</label>
-													<select 
-														value={formData.syncYear} 
-														onChange={e => setFormData({...formData, syncYear: e.target.value, syncProjectId: ''})}
-														className="w-full rounded-xl border-emerald-200 border p-2 bg-white text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all"
-													>
-														{YEARS.map(y => <option key={y} value={y}>{y} 年</option>)}
-                                                        <option value="Others">其他 (Others)</option>
-													</select>
-												</div>
-												
-												{/* 第二層：案號+案名 */}
-												<div className="space-y-1">
-													<label className="text-[10px] font-bold text-emerald-500 ml-1">案號 + 案名</label>
-													<select 
-														value={formData.syncProjectId} 
-														onChange={e => setFormData({...formData, syncProjectId: e.target.value})}
-														className="w-full rounded-xl border-emerald-200 border p-2 bg-white text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all"
-													>
-														<option value="">-- 請選擇專案 --</option>
-														{(PROJECTS_DATA[formData.syncYear] || []).map(p => (
-															<option key={p.id} value={p.id}>{p.id} {p.name}</option>
-														))}
-													</select>
-												</div>
-												<p className="text-[10px] text-emerald-400 font-medium leading-relaxed px-1 m-0">
-												1.選取後將同步建立至Google日曆。<br/>
-												2.如需增加可同步專案，需先於公司Google帳號建立日曆，再通知系統開發協助處理。
-												</p>
-											</div>
-										)}
-									</div>
-
-                                    <div className="space-y-1.5">
-                                        <label className="text-[11px] font-black text-slate-400 uppercase ml-1">預約事由</label>
-                                        <input type="text" value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all" placeholder="例：專案進度檢討會" />
-                                    </div>
-                                    <div className="space-y-1.5">
-                                        <label className="text-[11px] font-black text-slate-400 uppercase ml-1">預約人資訊</label>
-                                        <input type="text" value={formData.user} onChange={e => setFormData({...formData, user: e.target.value})} className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all" placeholder="姓名 + 分機" />
-                                    </div>
-                                    <button 
-                                        type="submit" 
-                                        disabled={isLoading || getDisplayResources(activeCategory).length === 0} 
-                                        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-4 rounded-xl shadow-lg shadow-blue-200 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 group"
-                                    >
-                                        {isLoading ? <Icon name="loader-2" size={20} /> : (
-                                            <>
-                                                <span>
-                                                    {getDisplayResources(activeCategory).length === 0
-                                                        ? '目前無可預約資源'
-                                                        : (formData.repeatType === 'none' ? '立即預約' : `批次預約登記 (${formData.repeatCount}筆)`)}
-                                                </span>
-                                                <Icon name="chevron-right" size={16} className="group-hover:translate-x-1 transition-transform" />
-                                            </>
-                                        )}
-                                    </button>
-                                </form>
-                            </div>
-
-                            {/* --- 管理者專用：預約登記報表 --- */}
-                            {isAdmin && (
-                                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-                                    <h3 className="text-sm font-black text-slate-800 mb-6 flex items-center gap-2">
-                                        <span className="w-1 h-5 bg-indigo-600 rounded-full"></span>
-                                        預約登記報表
-                                    </h3>
-
-                                    <div className="space-y-5">
-                                        <div className="space-y-1.5">
-                                            <label className="text-[11px] font-black text-slate-400 uppercase ml-1">
-                                                預約項目
-                                            </label>
-                                            <select
-                                                value={reportForm.resourceId}
-                                                onChange={e => setReportForm({...reportForm, resourceId: e.target.value})}
-                                                className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
-                                            >
-                                                {CATEGORIES.map(category => (
-                                                    <optgroup key={category.id} label={category.label}>
-                                                        {(RESOURCES[category.id] || []).map(res => (
-                                                            <option key={res.id} value={res.id}>
-                                                                {res.name}{isResourceHidden(res.id) ? '（目前隱藏）' : ''}
-                                                            </option>
-                                                        ))}
-                                                    </optgroup>
-                                                ))}
-                                            </select>
-                                        </div>
-
-                                        <div className="grid grid-cols-1 gap-4">
-                                            <div className="space-y-1.5">
-                                                <label className="text-[11px] font-black text-slate-400 uppercase ml-1">
-                                                    起始日期
-                                                </label>
-                                                <input
-                                                    type="date"
-                                                    value={reportForm.startDate}
-                                                    onChange={e => setReportForm({...reportForm, startDate: e.target.value})}
-                                                    className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
-                                                />
-                                            </div>
-
-                                            <div className="space-y-1.5">
-                                                <label className="text-[11px] font-black text-slate-400 uppercase ml-1">
-                                                    結束日期
-                                                </label>
-                                                <input
-                                                    type="date"
-                                                    value={reportForm.endDate}
-                                                    onChange={e => setReportForm({...reportForm, endDate: e.target.value})}
-                                                    className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
-                                                />
-                                                <p className="text-[10px] text-slate-400 font-medium ml-1">
-                                                    預設為本次登入管理者模式當日
-                                                </p>
-                                            </div>
-                                        </div>
-
-                                        <button
-                                            type="button"
-                                            onClick={exportReservationReport}
-                                            disabled={isReportLoading}
-                                            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-black py-3.5 rounded-xl shadow-lg shadow-indigo-100 transition-all active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2"
-                                        >
-                                            {isReportLoading ? (
-                                                <>
-                                                    <Icon name="loader-2" size={18} />
-                                                    <span>讀取報表資料中...</span>
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <Icon name="calendar" size={17} />
-                                                    <span>輸出預約登記報表</span>
-                                                </>
-                                            )}
-                                        </button>
-
-                                        <p className="text-[10px] text-slate-400 leading-relaxed font-medium">
-                                            報表格式：CSV（Excel 可直接開啟），欄位包含「預約項目、日期、預約者」。
-                                        </p>
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* --- 更新日誌區 (Logs) --- */}
-                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-                                <div className="flex items-center gap-2 mb-4 text-slate-800 border-b border-slate-50 pb-3">
-                                    <Icon name="info" size={18} className="text-blue-500" />
-                                    <h3 className="text-sm font-black">更新公告</h3>
-                                </div>
-                                <div className="space-y-5 max-h-[200px] overflow-y-auto no-scrollbar">
-                                    {VERSION_LOGS.map((log, idx) => (
-                                        <div key={idx} className="relative pl-5 border-l-2 border-slate-100">
-                                            <div className="absolute -left-[5px] top-0 w-2 h-2 bg-blue-500 rounded-full border-2 border-white"></div>
-                                            <div className="flex items-center gap-2 mb-1.5">
-                                                <span className="text-xs font-black text-blue-600">{log.version}</span>
-                                                <span className="text-[10px] text-slate-400 font-bold">{log.date}</span>
-                                            </div>
-                                            <ul className="text-[11px] text-slate-500 space-y-1.5 font-medium leading-relaxed">
-                                                {log.features.map((f, i) => <li key={i} className="flex gap-1.5"><span>•</span>{f}</li>)}
-                                            </ul>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        </aside>
-
-                        {/* --- 右側欄位：預約狀況展示區 (Main Content) --- */}
-                        <main className="lg:col-span-8 xl:col-span-9 flex flex-col"> 
-                            
-                            {/* --- 頁籤導覽區 (Category Tabs) --- */}
-                            <div className="flex space-x-3 mb-6 overflow-x-auto no-scrollbar pb-1">
-                                {CATEGORIES.map(category => (
-                                    <button
-                                        key={category.id}
-                                        onClick={() => handleCategoryChange(category.id)}
-                                        className={`flex items-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm transition-all whitespace-nowrap ${
-                                            activeCategory === category.id
-                                                ? 'bg-blue-600 text-white shadow-md shadow-blue-200 ring-2 ring-blue-600 ring-offset-2 ring-offset-slate-50'
-                                                : 'bg-white text-slate-500 hover:text-blue-600 hover:bg-blue-50 border border-slate-200'
-                                        }`}
-                                    >
-                                        <Icon name={category.icon} size={18} />
-                                        {category.label}預約
-                                    </button>
-                                ))}
-                            </div>
-
-                            {/* --- 預約狀況白底區塊 --- */}
-                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
-                                {/* 切換視圖與日期導覽 */}
-                                <div className="bg-slate-50/80 backdrop-blur-sm border-b border-slate-100 px-6 py-4 flex flex-col md:flex-row justify-between items-center gap-6">
-                                    <div className="flex items-center gap-4">
-                                        <h2 className="font-black text-slate-800 text-lg">預約狀況表</h2>
-                                        <div className="px-4 py-1.5 bg-white text-blue-700 font-black text-sm rounded-full shadow-sm border border-slate-200 inline-flex items-center gap-2">
-                                            <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
-                                            {currentDisplayHeader}
-                                        </div>
-                                    </div>
-                                    
-                                    <div className="flex items-center gap-4 bg-slate-200/50 p-1.5 rounded-2xl">
-                                        <div className="flex items-center bg-white rounded-xl shadow-sm p-1">
-                                            <button onClick={() => navigateDate(-1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 transition-colors"><Icon name="chevron-left" size={18} /></button>
-                                            <button onClick={goToCurrent} className="px-4 py-1 text-xs font-black text-slate-600 hover:text-blue-600 whitespace-nowrap">
-                                                {viewMode === 'daily' ? '跳到今天' : '跳到本月'}
-                                            </button>
-                                            <button onClick={() => navigateDate(1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 transition-colors"><Icon name="chevron-right" size={18} /></button>
-                                        </div>
-                                        <div className="flex gap-1 bg-slate-200/50 p-1 rounded-xl">
-                                            <button onClick={() => setViewMode('daily')} className={`px-5 py-2 text-xs font-black rounded-lg transition-all ${viewMode === 'daily' ? 'bg-white text-blue-600 shadow-md' : 'text-slate-500 hover:text-slate-700'}`}>日</button>
-                                            <button onClick={() => setViewMode('monthly')} className={`px-5 py-2 text-xs font-black rounded-lg transition-all ${viewMode === 'monthly' ? 'bg-white text-blue-600 shadow-md' : 'text-slate-500 hover:text-slate-700'}`}>月</button>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div className="p-6 min-h-[500px]">
-                                    {!currentScriptUrl && (
-                                        <div className="flex flex-col items-center justify-center h-64 text-slate-400">
-                                            <Icon name="info" size={48} className="mb-4 opacity-50" />
-                                            <p className="font-bold">尚未綁定 {CATEGORIES.find(c => c.id === activeCategory)?.label} 的 Google Sheet 網址</p>
-                                            <p className="text-xs mt-2">請系統管理員於程式碼 SCRIPT_URLS 進行設定</p>
-                                        </div>
-                                    )}
-
-                                    {currentScriptUrl && viewMode === 'daily' ? (
-                                        /* 日視圖內容：依資源分組 */
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-in fade-in duration-300">
-                                            {RESOURCES[activeCategory]
-                                                .filter(res => isAdmin || !isResourceHidden(res.id) || todaysBookings.some(b => b.resourceId === res.id))
-                                                .map(res => {
-                                                const resBookings = todaysBookings.filter(b => b.resourceId === res.id);
-                                                // 保護屬性讀取避免當機
-                                                const currentStatus = (resourceStatuses || {})[res.id]; 
-                                                return (
-                                                    <div key={res.id} className={`bg-slate-50/50 rounded-2xl p-5 border flex flex-col h-full ${isAdmin && isResourceHidden(res.id) ? 'border-slate-300 opacity-70' : 'border-slate-100'}`}>
-                                                        <div className="flex items-center justify-between mb-4 gap-3">
-                                                            <h3 className={`text-[11px] font-black px-3 py-1 rounded-full border shadow-sm ${res.color}`}>{res.name}</h3>
-                                                            <div className="flex items-center gap-2 shrink-0">
-                                                                {activeCategory === 'room' ? (
-                                                                    <span className="text-[10px] font-bold text-slate-400">{resBookings.length} 筆預約</span>
-                                                                ) : (
-                                                                    <button
-                                                                        onClick={() => toggleResourceStatus(res.id)}
-                                                                        className={`text-[10px] font-black px-2.5 py-1 rounded-md border transition-all ${
-                                                                            currentStatus === 'borrowed'
-                                                                                ? 'bg-rose-100 text-rose-600 border-rose-200 shadow-sm'
-                                                                                : 'bg-emerald-100 text-emerald-600 border-emerald-200 shadow-sm'
-                                                                        } ${isAdmin ? 'cursor-pointer hover:scale-105' : 'cursor-default opacity-80'}`}
-                                                                    >
-                                                                        {currentStatus === 'borrowed' ? '借用中' : '可借用'}
-                                                                    </button>
-                                                                )}
-                                                                {isAdmin && (
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => toggleResourceVisibility(res.id)}
-                                                                        title={isResourceHidden(res.id) ? "恢復一般使用者顯示" : "隱藏此資源"}
-                                                                        aria-label={isResourceHidden(res.id) ? "恢復一般使用者顯示" : "隱藏此資源"}
-                                                                        className={`p-1.5 rounded-lg border transition-all ${
-                                                                            isResourceHidden(res.id)
-                                                                                ? 'bg-slate-700 text-white border-slate-700 hover:bg-slate-800'
-                                                                                : 'bg-white text-slate-400 border-slate-200 hover:text-indigo-600 hover:border-indigo-300'
-                                                                        }`}
-                                                                    >
-                                                                        <Icon name={isResourceHidden(res.id) ? "eye-off" : "eye"} size={13} />
-                                                                    </button>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                        {resBookings.length === 0 ? (
-                                                            <div className="flex-1 flex flex-col items-center justify-center py-10 opacity-30">
-                                                                <Icon name={CATEGORIES.find(c => c.id === activeCategory)?.icon || "calendar"} size={32} />
-                                                                <p className="text-xs font-bold mt-2">今日尚無預約</p>
-                                                            </div>
-                                                        ) : (
-                                                            <div className="space-y-3">
-                                                                {resBookings.map(b => (
-                                                                    <div key={b.id} className="group relative bg-white p-4 rounded-xl border border-slate-100 shadow-sm hover:shadow-md hover:border-blue-200 transition-all">
-                                                                        <div className="flex items-center gap-3 mb-2">
-                                                                            <span className="text-[11px] font-black text-blue-600 bg-blue-50 px-2 py-0.5 rounded border border-blue-100">{b.startTime} - {b.endTime}</span>
-                                                                        </div>
-                                                                        <div className="text-sm font-black text-slate-700 truncate mb-1">{b.title}</div>
-                                                                        <div className="flex items-center justify-between">
-                                                                            <span className="text-[11px] text-slate-400 font-bold flex items-center gap-1">
-                                                                                <div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>
-                                                                                預約人：{b.user}
-                                                                            </span>
-																			{/* 權限核心修改：如果是「會議室」則全面開放修改、刪除按鈕；其餘分類則仍需要管理員權限 */}
-                                                                            {(activeCategory === 'room' || isAdmin) && (
-                                                                                <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-all translate-y-2 group-hover:translate-y-0">
-                                                                                    <button onClick={() => setEditingBooking(b)} className="text-slate-400 hover:text-blue-500 p-1.5 bg-slate-50 rounded-lg hover:shadow-sm transition-all"><Icon name="edit" size={14} /></button>
-                                                                                    <button onClick={() => handleDelete(b.id)} className="text-slate-400 hover:text-rose-500 p-1.5 bg-slate-50 rounded-lg hover:shadow-sm transition-all"><Icon name="x" size={14} /></button>
-                                                                                </div>
-                                                                            )}
-                                                                        </div>																			  
-                                                                    </div>
-                                                            
-                                                                ))}
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                );
-                                            })}
-                                        </div>
-                                    ) : currentScriptUrl && viewMode === 'monthly' ? (
-                                        /* 月視圖內容：渲染整月日曆 */
-                                        <div className="animate-in fade-in duration-500">
-                                            {renderMonthCalendar()}
-                                        </div>
-                                    ) : null}
-
-                                    <div className="mt-8 flex flex-col md:flex-row items-center justify-between gap-4 p-4 bg-rose-50 rounded-xl border border-rose-100">
-                                        <div className="flex items-center gap-3 text-rose-600">
-                                            <Icon name="info" size={20} />
-											{/* 根據當前的 activeCategory 顯示對應的注意事項 */}
-													<p className="text-xs md:text-sm font-black">
-														{CATEGORY_NOTES[activeCategory] || "注意事項：如需異動或取消已登記預約，請聯繫各類別管理者協助處理。"}
-													</p>
-                                        </div>
-                                    </div>								  
-                                </div>
-                            </div>
-                        </main>
-                    </div>
-
-                    {/* --- 頁尾維護資訊 (Footer) --- */}
-                    <footer className="mt-12 pt-8 border-t border-slate-200 grid grid-cols-1 md:grid-cols-2 gap-8 pb-10">
-                        <div className="space-y-4">
-                            <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">系統開發與維護</h4>
-                            <div className="flex gap-8">
-                                <div className="space-y-1">
-                                    <p className="text-[11px] text-slate-400 font-black underline decoration-2 underline-offset-4">系統開發</p>
-                                    <p className="text-xs text-slate-600 font-bold">吳書緯 (分機 731) / 許卓嘉 (分機 734)</p>
-                                </div>
-                            </div>
-                        </div>
-                        <div className="space-y-4">
-                            <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">各類別管理者</h4>
-                            <div className="grid grid-cols-3 gap-6">
-                                <div className="space-y-1">
-                                    <p className="text-[11px] text-blue-400 font-black underline decoration-2 underline-offset-4">會議設備/公務車/公務悠遊卡</p>
-                                    <div className="text-[10px] text-slate-500 font-bold grid grid-cols-1 gap-1">
-                                        <span>劉珏妏 (分機 169)</span>		
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </footer>
-
-                    {/* --- 管理者編輯彈出視窗 (Edit Modal) --- */}
-                    {editingBooking && (
-                        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md flex items-center justify-center z-[100] p-4">
-                            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden">
-                                <div className="bg-indigo-600 px-6 py-5 text-white flex justify-between items-center">
-                                    <h3 className="font-black">修改預約資料</h3>
-                                    <button onClick={() => setEditingBooking(null)} className="p-2 hover:bg-white/20 rounded-xl transition-colors"><Icon name="x" size={20} /></button>
-                                </div>
-                                <div className="p-8 space-y-5">
-                                    {/* 編輯表單欄位 */}
-                                    <div className="space-y-1.5">
-                                        <label className="text-[11px] font-black text-slate-400 uppercase">預約項目</label>
-                                        <select value={editingBooking.resourceId} onChange={e => setEditingBooking({...editingBooking, resourceId: e.target.value})} className="w-full border rounded-xl p-3 text-sm font-bold bg-slate-50 focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all">
-                                            {RESOURCES[activeCategory].map(res => (
-                                                <option key={res.id} value={res.id}>
-                                                    {res.name}{isResourceHidden(res.id) ? '（目前暫停預約）' : ''}
-                                                </option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                    <div className="space-y-1.5">
-                                        <label className="text-[11px] font-black text-slate-400 uppercase">預約日期</label>
-                                        <input type="date" value={editingBooking.date} onChange={e => setEditingBooking({...editingBooking, date: e.target.value})} className="w-full border rounded-xl p-3 text-sm font-bold bg-slate-50 focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all" />
-                                    </div>
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div className="space-y-1.5">
-                                            <label className="text-[11px] font-black text-slate-400 uppercase">開始</label>
-                                            <select value={editingBooking.startTime} onChange={e => handleStartTimeChange(e.target.value, true)} className="w-full border rounded-xl p-3 text-sm font-bold bg-slate-50 outline-none transition-all">
-                                                {TIME_OPTIONS.slice(0, -1).map(t => <option key={t} value={t}>{t}</option>)}
-                                            </select>
-                                        </div>
-                                        <div className="space-y-1.5">
-                                            <label className="text-[11px] font-black text-slate-400 uppercase">結束</label>
-                                            <select value={editingBooking.endTime} onChange={e => handleEndTimeChange(e.target.value, true)} className="w-full border rounded-xl p-3 text-sm font-bold bg-slate-50 outline-none transition-all">
-                                                {TIME_OPTIONS.slice(1).map(t => <option key={t} value={t}>{t}</option>)}
-                                            </select>
-                                        </div>
-                                    </div>
-                                    <div className="space-y-1.5">
-                                        <label className="text-[11px] font-black text-slate-400 uppercase">預約事由</label>
-                                        <input type="text" value={editingBooking.title} onChange={e => setEditingBooking({...editingBooking, title: e.target.value})} className="w-full border rounded-xl p-3 text-sm font-bold bg-slate-50 outline-none transition-all" />
-                                    </div>
-                                    <div className="space-y-1.5">
-                                        <label className="text-[11px] font-black text-slate-400 uppercase">預約者</label>
-                                        <input type="text" value={editingBooking.user} onChange={e => setEditingBooking({...editingBooking, user: e.target.value})} className="w-full border rounded-xl p-3 text-sm font-bold bg-slate-50 outline-none transition-all" />
-                                    </div>
-                                    {/* ... 其他編輯欄位比照主表單 ... */}
-                                    <div className="flex gap-4 pt-6">
-                                        <button onClick={() => setEditingBooking(null)} className="flex-1 py-3 text-slate-500 font-black hover:bg-slate-100 rounded-xl transition-colors">取消</button>
-                                        <button onClick={handleUpdate} disabled={isLoading} className="flex-1 py-3 bg-indigo-600 text-white font-black rounded-xl shadow-lg hover:bg-indigo-700 transition-all">確認儲存</button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* --- 全域通知元件 (Toast) --- */}
-                    {notification && (
-                        <div className={`fixed bottom-8 left-1/2 -translate-x-1/2 md:left-auto md:right-8 md:translate-x-0 px-8 py-4 rounded-2xl shadow-2xl text-white font-black z-[110] animate-in slide-in-from-bottom-10 duration-500 flex items-center gap-3 ${notification.type === 'error' ? 'bg-rose-500 shadow-rose-200' : 'bg-emerald-600 shadow-emerald-200'}`}>
-                            <Icon name={notification.type === 'error' ? 'x' : 'info'} size={20} />
-                            {notification.message}
-                        </div>
-                    )}
-                </div>
-            );
+        existingSameCount++;
+      }
+    }
+
+    if (existingSameCount === bookings.length) {
+      alreadyApplied = true;
+    } else if (existingSameCount > 0) {
+      return rtSaveOperationResult_(requestId, { status: 'error', code: 'PARTIAL_DUPLICATE', message: '偵測到不完整的重送狀態，已停止寫入' });
+    }
+
+    if (!alreadyApplied) {
+      for (let i = 0; i < bookings.length; i++) {
+        const conflict = rtFindConflict_(rows, bookings[i], null);
+        if (conflict) {
+          return rtSaveOperationResult_(requestId, {
+            status: 'error', code: 'CONFLICT', message: '預約時段衝突', conflict: conflict
+          });
         }
+      }
 
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
-    </script>
-</body>
-</html>
+      const appendRows = bookings.map(function(b) { return rtBookingToRow_(b, ""); });
+      const startRow = Math.max(sheet.getLastRow() + 1, 2);
+      sheet.getRange(startRow, 1, appendRows.length, 10).setValues(appendRows);
+      SpreadsheetApp.flush();
+      rtInvalidateBookingsCache_();
+    }
+  } finally {
+    lock.releaseLock();
+  }
+
+  if (alreadyApplied) {
+    return rtSaveOperationResult_(requestId, {
+      status: 'success', code: 'ALREADY_APPLIED', message: '預約已存在', count: bookings.length,
+      bookingIds: bookings.map(function(b) { return b.id; })
+    });
+  }
+
+  const calendarWarnings = [];
+  for (let i = 0; i < bookings.length; i++) {
+    const b = bookings[i];
+    const cal = rtCalendarForNewBooking_(b);
+    if (!cal.ok) {
+      calendarWarnings.push({ id: b.id, message: cal.warning });
+      continue;
+    }
+    if (cal.eventId) {
+      const stored = rtSetCalendarMetaById_(b.id, b.syncYear, b.syncProjectId, cal.eventId);
+      if (!stored) {
+        rtStrictDeleteCalendarEvent_(CALENDAR_MAPPING[b.syncProjectId], cal.eventId);
+        calendarWarnings.push({ id: b.id, message: '預約已變更，已取消剛建立的日曆事件' });
+      }
+    }
+  }
+
+  return rtSaveOperationResult_(requestId, {
+    status: 'success',
+    code: calendarWarnings.length ? 'BOOKING_OK_CALENDAR_PARTIAL' : 'SUCCESS',
+    message: calendarWarnings.length ? '預約成功，但部分 Google 日曆同步失敗' : '預約成功',
+    count: bookings.length,
+    bookingIds: bookings.map(function(b) { return b.id; }),
+    calendarWarnings: calendarWarnings
+  });
+}
+
+function rtProcessUpdate_(ss, payload, requestId) {
+  const booking = rtNormalizeBooking_(payload.data || {});
+  const validation = rtValidateBooking_(booking);
+  if (validation) return rtSaveOperationResult_(requestId, Object.assign({ status: 'error' }, validation));
+
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) return rtSaveOperationResult_(requestId, { status: 'error', code: 'SHEET_NOT_FOUND', message: '找不到預約資料工作表' });
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(RT_BOOKING_LOCK_TIMEOUT_MS)) {
+    return rtSaveOperationResult_(requestId, { status: 'error', code: 'LOCK_TIMEOUT', message: '系統忙碌中，請稍後再試' });
+  }
+
+  let oldMeta = null;
+  try {
+    if (requestId) {
+      const completed = rtGetOperationResult_(requestId);
+      if (completed) return completed;
+    }
+
+    if (isResourceHidden_(ss, booking.resourceId)) {
+      return rtSaveOperationResult_(requestId, { status: 'error', code: 'RESOURCE_HIDDEN', message: '此資源目前暫停預約' });
+    }
+
+    const rows = sheet.getDataRange().getValues();
+    let rowIndex = -1;
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i][0]) === booking.id) { rowIndex = i + 1; break; }
+    }
+    if (rowIndex === -1) {
+      return rtSaveOperationResult_(requestId, { status: 'error', code: 'NOT_FOUND', message: '找不到原預約資料' });
+    }
+
+    const conflict = rtFindConflict_(rows, booking, booking.id);
+    if (conflict) {
+      return rtSaveOperationResult_(requestId, { status: 'error', code: 'CONFLICT', message: '修改後時段衝突', conflict: conflict });
+    }
+
+    const oldRow = rows[rowIndex - 1];
+    oldMeta = { syncYear: String(oldRow[7] || ""), syncProjectId: String(oldRow[8] || ""), eventId: String(oldRow[9] || "") };
+
+    // 先只更新預約核心欄位；Calendar metadata 等外部同步完成後再更新。
+    sheet.getRange(rowIndex, 1, 1, 7).setValues([[
+      booking.id, booking.resourceId, booking.date, booking.startTime, booking.endTime,
+      booking.title, booking.user
+    ]]);
+    SpreadsheetApp.flush();
+    rtInvalidateBookingsCache_();
+  } finally {
+    lock.releaseLock();
+  }
+
+  const warnings = [];
+  let finalSyncYear = oldMeta.syncYear;
+  let finalProject = oldMeta.syncProjectId;
+  let finalEventId = oldMeta.eventId;
+  const wantsCalendar = booking.syncCalendar && booking.syncProjectId && CALENDAR_MAPPING[booking.syncProjectId];
+
+  if (oldMeta.eventId && oldMeta.syncProjectId && CALENDAR_MAPPING[oldMeta.syncProjectId]) {
+    const deleted = rtStrictDeleteCalendarEvent_(CALENDAR_MAPPING[oldMeta.syncProjectId], oldMeta.eventId);
+    if (!deleted) {
+      warnings.push('舊 Google 日曆事件刪除失敗，為避免重複事件，本次未建立新事件');
+      return rtSaveOperationResult_(requestId, {
+        status: 'success', code: 'BOOKING_OK_CALENDAR_PARTIAL', message: '預約已修改，但 Google 日曆同步失敗',
+        bookingId: booking.id, calendarWarnings: warnings
+      });
+    }
+    finalEventId = "";
+  }
+
+  if (wantsCalendar) {
+    const cal = rtCalendarForNewBooking_(booking);
+    finalSyncYear = booking.syncYear;
+    finalProject = booking.syncProjectId;
+    finalEventId = cal.eventId || "";
+    if (!cal.ok) warnings.push(cal.warning);
+  } else {
+    finalSyncYear = "";
+    finalProject = "";
+    finalEventId = "";
+  }
+
+  const metaStored = rtSetCalendarMetaById_(booking.id, finalSyncYear, finalProject, finalEventId);
+  if (!metaStored && finalEventId && finalProject && CALENDAR_MAPPING[finalProject]) {
+    rtStrictDeleteCalendarEvent_(CALENDAR_MAPPING[finalProject], finalEventId);
+    warnings.push('預約在同步日曆期間已被刪除，已移除新日曆事件');
+  }
+
+  return rtSaveOperationResult_(requestId, {
+    status: 'success',
+    code: warnings.length ? 'BOOKING_OK_CALENDAR_PARTIAL' : 'SUCCESS',
+    message: warnings.length ? '預約已修改，但 Google 日曆同步有警告' : '資料已修改',
+    bookingId: booking.id,
+    calendarWarnings: warnings
+  });
+}
+
+function rtProcessDelete_(ss, payload, requestId) {
+  const idToDelete = String(payload.id || "").trim();
+  if (!idToDelete) return rtSaveOperationResult_(requestId, { status: 'error', code: 'INVALID_INPUT', message: '缺少預約編號' });
+
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) return rtSaveOperationResult_(requestId, { status: 'error', code: 'SHEET_NOT_FOUND', message: '找不到預約資料工作表' });
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(RT_BOOKING_LOCK_TIMEOUT_MS)) {
+    return rtSaveOperationResult_(requestId, { status: 'error', code: 'LOCK_TIMEOUT', message: '系統忙碌中，請稍後再試' });
+  }
+
+  let oldMeta = null;
+  try {
+    if (requestId) {
+      const completed = rtGetOperationResult_(requestId);
+      if (completed) return completed;
+    }
+
+    const rows = sheet.getDataRange().getValues();
+    let rowIndex = -1;
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i][0]) === idToDelete) { rowIndex = i + 1; break; }
+    }
+
+    if (rowIndex === -1) {
+      return rtSaveOperationResult_(requestId, { status: 'success', code: 'ALREADY_DELETED', message: '資料已不存在' });
+    }
+
+    const oldRow = rows[rowIndex - 1];
+    oldMeta = { syncProjectId: String(oldRow[8] || ""), eventId: String(oldRow[9] || "") };
+    sheet.deleteRow(rowIndex);
+    SpreadsheetApp.flush();
+    rtInvalidateBookingsCache_();
+  } finally {
+    lock.releaseLock();
+  }
+
+  const warnings = [];
+  if (oldMeta.eventId && oldMeta.syncProjectId && CALENDAR_MAPPING[oldMeta.syncProjectId]) {
+    const ok = rtStrictDeleteCalendarEvent_(CALENDAR_MAPPING[oldMeta.syncProjectId], oldMeta.eventId);
+    if (!ok) warnings.push('Google 日曆事件刪除失敗，請人工確認');
+  }
+
+  return rtSaveOperationResult_(requestId, {
+    status: 'success',
+    code: warnings.length ? 'BOOKING_DELETED_CALENDAR_FAILED' : 'SUCCESS',
+    message: warnings.length ? '預約已刪除，但 Google 日曆刪除失敗' : '已刪除',
+    bookingId: idToDelete,
+    calendarWarnings: warnings
+  });
+}
+
+
+function doPost(e) {
+  let payload = null;
+  let requestId = "";
+  try {
+    payload = JSON.parse(e.postData.contents);
+    const action = payload.action;
+    requestId = String(payload.requestId || "").trim();
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    if (requestId) {
+      const completed = rtGetOperationResult_(requestId);
+      if (completed) return rtJson_(completed);
+    }
+
+    // 原有資源設定／借還狀態操作仍維持既有流程。
+    if (action === 'updateVisibility') {
+      const resId = String(payload.data && payload.data.resourceId || "").trim();
+      const newVisibility = payload.data && payload.data.visibility === 'hidden' ? 'hidden' : 'visible';
+      if (!resId) return rtJson_({ status: 'error', message: 'resourceId is required' });
+
+      const lock = LockService.getScriptLock();
+      if (!lock.tryLock(5000)) return rtJson_({ status: 'error', code: 'LOCK_TIMEOUT', message: '系統忙碌中' });
+      try {
+        let visibilitySheet = ss.getSheetByName(SHEET_VISIBILITY);
+        if (!visibilitySheet) {
+          visibilitySheet = ss.insertSheet(SHEET_VISIBILITY);
+          visibilitySheet.appendRow(["resourceId", "visibility"]);
+        }
+        const rows = visibilitySheet.getDataRange().getValues();
+        let targetRow = -1;
+        for (let i = 1; i < rows.length; i++) {
+          if (String(rows[i][0]) === resId) { targetRow = i + 1; break; }
+        }
+        if (targetRow !== -1) visibilitySheet.getRange(targetRow, 2).setValue(newVisibility);
+        else visibilitySheet.appendRow([resId, newVisibility]);
+        SpreadsheetApp.flush();
+        if (typeof bumpResourceStateVersion_ === 'function') bumpResourceStateVersion_();
+      } finally {
+        lock.releaseLock();
+      }
+      return rtJson_({ status: 'success', resourceId: resId, visibility: newVisibility });
+    }
+
+    if (action === 'updateStatus') {
+      if (typeof SHEET_STATUS === 'undefined') {
+        return rtJson_({ status: 'error', code: 'UNSUPPORTED_ACTION', message: '此分類沒有借還狀態功能' });
+      }
+      const resId = String(payload.data && payload.data.resourceId || "").trim();
+      const newStatus = payload.data && payload.data.status === 'borrowed' ? 'borrowed' : 'available';
+      if (!resId) return rtJson_({ status: 'error', message: 'resourceId is required' });
+
+      const lock = LockService.getScriptLock();
+      if (!lock.tryLock(5000)) return rtJson_({ status: 'error', code: 'LOCK_TIMEOUT', message: '系統忙碌中' });
+      try {
+        let statusSheet = ss.getSheetByName(SHEET_STATUS);
+        if (!statusSheet) {
+          statusSheet = ss.insertSheet(SHEET_STATUS);
+          statusSheet.appendRow(["resourceId", "status"]);
+        }
+        const rows = statusSheet.getDataRange().getValues();
+        let rowIndex = -1;
+        for (let i = 1; i < rows.length; i++) {
+          if (String(rows[i][0]) === resId) { rowIndex = i + 1; break; }
+        }
+        if (rowIndex !== -1) statusSheet.getRange(rowIndex, 2).setValue(newStatus);
+        else statusSheet.appendRow([resId, newStatus]);
+        SpreadsheetApp.flush();
+        if (typeof bumpResourceStateVersion_ === 'function') bumpResourceStateVersion_();
+      } finally {
+        lock.releaseLock();
+      }
+      return rtJson_({ status: 'success', resourceId: resId, state: newStatus });
+    }
+
+    if (action === 'add' || action === 'addBatch') {
+      const result = rtProcessAddBatch_(ss, payload, requestId);
+      return rtJson_(result);
+    }
+
+    if (action === 'update') {
+      const result = rtProcessUpdate_(ss, payload, requestId);
+      return rtJson_(result);
+    }
+
+    if (action === 'delete') {
+      const result = rtProcessDelete_(ss, payload, requestId);
+      return rtJson_(result);
+    }
+
+    return rtJson_({ status: 'error', code: 'UNKNOWN_ACTION', message: '不支援的操作' });
+  } catch (error) {
+    const result = { status: 'error', code: 'SERVER_ERROR', message: error.toString() };
+    if (requestId) rtSaveOperationResult_(requestId, result);
+    return rtJson_(result);
+  }
+}
+
+function createCalendarEvent(data) {
+  const calendarId = CALENDAR_MAPPING[data.syncProjectId];
+  const calendar = CalendarApp.getCalendarById(calendarId);
+  const startDateTime = new Date(`${data.date}T${data.startTime}:00`);
+  const endDateTime = new Date(`${data.date}T${data.endTime}:00`);
+  
+  const easycards = {'card-a':'公務悠遊卡 01','card-c':'公務悠遊卡 03','card-d':'公務悠遊卡 04','card-e':'公務悠遊卡 05','card-f':'公務悠遊卡 06'};
+  const easycardName = easycards[data.resourceId] || '公務悠遊卡';
+  
+  const event = calendar.createEvent(`[${easycardName}] ${data.title} - ${data.user}`, startDateTime, endDateTime, {
+    description: `預約者：${data.user}\n公務悠遊卡：${easycardName}\n\n此筆預約由公司資源預約系統自動建立。`
+  });
+  
+  return event.getId();
+}
+
+function deleteCalendarEvent(calendarId, eventId) {
+  try {
+    const calendar = CalendarApp.getCalendarById(calendarId);
+    const event = calendar.getEventById(eventId);
+    if (event) event.deleteEvent();
+  } catch (e) {
+    console.error("刪除日曆事件失敗: " + e.message);
+  }
+}
+
+/**
+ * 自動清理過期預約資料
+ *
+ * 資料保存規則：
+ * 1. 自 2026/09/01 開始採用「保存一年」制度。
+ * 2. 2027/09/01 前完全不進行自動清理。
+ * 3. 2027/09/01 起，每天檢查一次。
+ * 4. 每筆預約資料至少完整保存一年。
+ * 5. 預約日期滿一年後的隔天，才會被刪除。
+ *
+ * 範例：
+ * 預約日期：2026/10/15
+ * 2027/10/15 → 仍然保留
+ * 2027/10/16 → 可以刪除
+ */
+function autoCleanupPastBookings() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    console.log("找不到預約資料工作表。");
+    return;
+  }
+
+  const timeZone = "GMT+8";
+  const now = new Date();
+  const todayStr = Utilities.formatDate(now, timeZone, "yyyy-MM-dd");
+  const today = new Date(todayStr + "T00:00:00+08:00");
+  const firstCleanupDate = new Date("2027-09-01T00:00:00+08:00");
+  if (today < firstCleanupDate) {
+    console.log("目前仍在資料保存期間，尚未滿一年，不執行清理。");
+    return;
+  }
+
+  const cutoffDate = new Date(today);
+  cutoffDate.setFullYear(cutoffDate.getFullYear() - 1);
+  const cutoffDateStr = Utilities.formatDate(cutoffDate, timeZone, "yyyy-MM-dd");
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(RT_BOOKING_LOCK_TIMEOUT_MS)) {
+    console.log("預約資料正在寫入，本次自動清理延後至下次執行。");
+    return;
+  }
+
+  let deletedCount = 0;
+  try {
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) {
+      console.log("目前沒有需要清理的預約資料。");
+      return;
+    }
+    const data = sheet.getRange(1, 1, lastRow, sheet.getLastColumn()).getValues();
+    for (let i = data.length - 1; i >= 1; i--) {
+      const rowDateValue = data[i][2];
+      if (!rowDateValue) continue;
+      try {
+        const rowDateStr = Utilities.formatDate(new Date(rowDateValue), timeZone, "yyyy-MM-dd");
+        const rowDate = new Date(rowDateStr + "T00:00:00+08:00");
+        if (rowDate < cutoffDate) {
+          sheet.deleteRow(i + 1);
+          deletedCount++;
+        }
+      } catch (error) {
+        console.error("日期解析失敗，第 " + (i + 1) + " 列：" + error.message);
+      }
+    }
+    if (deletedCount > 0) {
+      SpreadsheetApp.flush();
+      rtInvalidateBookingsCache_();
+    }
+  } finally {
+    lock.releaseLock();
+  }
+
+  console.log(
+    "預約資料清理完成。" +
+    "\n執行日期：" + todayStr +
+    "\n資料保留基準：" + cutoffDateStr + "（含）之後" +
+    "\n刪除筆數：" + deletedCount
+  );
+}
