@@ -4,7 +4,7 @@
     <link rel="icon" href="./favicon.ico" type="image/x-icon">
 	<meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>大林聯合建築師事務所 公司資源預約管理系統 V2.2.1 RC4</title>
+    <title>大林聯合建築師事務所 公司資源預約管理系統 V2.2.2</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -39,7 +39,7 @@
         // ============================================================
         // 1. 系統常數設定 (System Configuration)
         // ============================================================
-        const CURRENT_VERSION = "V2.2.1";
+        const CURRENT_VERSION = "V2.2.2";
         // Google Apps Script 部署網址 (後端 API)
         const SCRIPT_URLS = {
             room: "https://script.google.com/macros/s/AKfycbxSAxtLhn-CmHjK7N3J7U-8ernb9CnVYIUArEJmT8VI-Dj82rexMq2E9jl3ZQlBr5DD/exec",
@@ -66,6 +66,16 @@
 
         // 系統更新日誌內容
         const VERSION_LOGS = [
+            {
+                version: "V2.2.2",
+                date: "2026-11-15",
+                features: [
+                    "優化多人同步與資源借還狀態更新",
+                    "強化預約時段衝突防護及週期預約處理",
+                    "新增日／月檢視快速預約功能",
+                    "月曆放假日粉色標示，支援臺灣假日自動更新"
+                ]
+            },
             {
                 version: "V2.2",
                 date: "2026-09-13",
@@ -162,6 +172,54 @@
                 { id: 'tool-b', name: 'BOSCH GLM 40 雷射測距儀', color: 'bg-yellow-50 border-yellow-200 text-yellow-700', dot: 'bg-yellow-500' }
             ]
         };																																	 																												  			  	  
+        // 臺灣政府行政機關辦公日曆：2026、2027 年已公告之平日放假／補假日。
+        // 週六、週日由日期程式判斷；此表只列需額外標成放假的平日。
+        // 來源：行政院人事行政總處 115、116 年政府行政機關辦公日曆表。
+        // 2026、2027 年內建資料只作離線備援；有獨立假日 GAS 後優先採用最新官方資料。
+        // 未公告年度不推算補假，僅標示週六／週日。
+        // 新年度會在官方來源新增且 GAS 同步成功後自動套用，無須每年修改 HTML。
+        // 請在完成獨立「假日資料同步 GAS」部署後填入其 /exec 網址。
+        // 留空時不影響預約功能，月曆採 2026/2027 備援＋其他年份的週末標示。
+        const HOLIDAY_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbx6t2eaYIhxhfTVzBcKVLIbpOAa1ZDOwbI3Ua6gsFpy21ZuNkihi7EzAlf5mMEPbIlcXw/exec";
+        const HOLIDAY_LOCAL_CACHE_PREFIX = 'company-resource-official-holidays-v1-';
+        const HOLIDAY_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000; // 每個瀏覽器至多每12小時檢查一次
+
+        const TW_OFFICIAL_WEEKDAY_HOLIDAYS = {
+            '2026-01-01': '中華民國開國紀念日',
+            '2026-02-16': '小年夜',
+            '2026-02-17': '農曆春節',
+            '2026-02-18': '農曆春節',
+            '2026-02-19': '農曆春節',
+            '2026-02-20': '春節補假',
+            '2026-02-27': '和平紀念日補假',
+            '2026-04-03': '兒童節補假',
+            '2026-04-06': '清明節補假',
+            '2026-05-01': '勞動節',
+            '2026-06-19': '端午節',
+            '2026-09-25': '中秋節',
+            '2026-09-28': '教師節',
+            '2026-10-09': '國慶日補假',
+            '2026-10-26': '臺灣光復節補假',
+            '2026-12-25': '行憲紀念日',
+            '2027-01-01': '中華民國開國紀念日',
+            '2027-02-04': '小年夜',
+            '2027-02-05': '除夕',
+            '2027-02-08': '農曆春節',
+            '2027-02-09': '春節補假',
+            '2027-02-10': '春節補假',
+            '2027-03-01': '和平紀念日補假',
+            '2027-04-05': '清明節',
+            '2027-04-06': '兒童節補假',
+            '2027-04-30': '勞動節補假',
+            '2027-06-09': '端午節',
+            '2027-09-15': '中秋節',
+            '2027-09-28': '教師節',
+            '2027-10-11': '國慶日補假',
+            '2027-10-25': '臺灣光復節',
+            '2027-12-24': '行憲紀念日補假',
+            '2027-12-31': '2028年開國紀念日補假',
+        };
+
         // 生成時間下拉選單 (08:00 - 20:30)
         const generateTimeOptions = () => {
             const options = [];
@@ -175,6 +233,9 @@
 					
 		// Google Calendar 個案分類選單
 		const PROJECTS_DATA = {
+			"2026": [
+				{ id: "26027", name: "民航局局史館專業顧問與督工案" }
+			],
 			"2025": [
 				{ id: "25003", name: "臺北市萬華福興社會住宅2區" },
 				{ id: "25008", name: "慶城街都更" },
@@ -311,6 +372,88 @@
             const [activeCategory, setActiveCategory] = useState('room'); // 當前頁籤			
             const [viewMode, setViewMode] = useState('daily'); // 顯示模式：daily (日), monthly (月)														   
             const [selectedDate, setSelectedDate] = useState(formatDate(new Date())); // 目前選取的日期
+            const selectedHolidayYear = Number(selectedDate.slice(0, 4));
+            const [officialHolidayYears, setOfficialHolidayYears] = useState({}); // 取得並驗證過的完整官方年度假日表
+
+            // 假日 API 獨立於五套預約 GAS，同步失敗只影響假日顏色，不影響預約資料。
+            useEffect(() => {
+                const year = selectedHolidayYear;
+                if (!Number.isInteger(year) || year < 2000 || year > 2100) return;
+                const cacheKey = HOLIDAY_LOCAL_CACHE_PREFIX + year;
+                const checkedKey = cacheKey + '-checked-at';
+                let cancelled = false;
+                let fetching = false;
+
+                try {
+                    const cached = JSON.parse(localStorage.getItem(cacheKey) || 'null');
+                    if (cached?.published === true && cached.year === year && cached.holidays && typeof cached.holidays === 'object') {
+                        setOfficialHolidayYears(prev => ({ ...prev, [year]: cached.holidays }));
+                    }
+                } catch (error) {
+                    console.warn('假日備援快取無法讀取:', error);
+                }
+
+                const updateYear = async () => {
+                    if (cancelled || fetching || !HOLIDAY_SCRIPT_URL) return;
+                    const lastChecked = (() => {
+                        try { return Number(localStorage.getItem(checkedKey)) || 0; }
+                        catch (e) { return 0; }
+                    })();
+                    if (Date.now() - lastChecked < HOLIDAY_CHECK_INTERVAL_MS) return;
+                    fetching = true;
+                    try {
+                        const separator = HOLIDAY_SCRIPT_URL.includes('?') ? '&' : '?';
+                        const response = await fetch(
+                            `${HOLIDAY_SCRIPT_URL}${separator}type=holidays&year=${year}`,
+                            { cache: 'no-store' }
+                        );
+                        if (!response.ok) throw new Error('假日服務 HTTP ' + response.status);
+                        const data = await response.json();
+                        if (!data || Number(data.year) !== year || typeof data.published !== 'boolean') {
+                            throw new Error('假日資料回傳格式不正確');
+                        }
+                        if (data.published) {
+                            const holidays = data.holidays;
+                            if (!holidays || typeof holidays !== 'object' || Array.isArray(holidays)) {
+                                throw new Error('假日清單格式不正確');
+                            }
+                            const entries = Object.entries(holidays);
+                            if (entries.length === 0 || entries.some(([date, name]) =>
+                                !/^\d{4}-\d{2}-\d{2}$/.test(date) || date.slice(0, 4) !== String(year) || typeof name !== 'string')) {
+                                throw new Error('假日資料尚不完整');
+                            }
+                            if (!cancelled) {
+                                setOfficialHolidayYears(prev => ({ ...prev, [year]: holidays }));
+                                try {
+                                    localStorage.setItem(cacheKey, JSON.stringify({ year, published: true, holidays, updatedAt: data.updatedAt || '' }));
+                                } catch (error) {
+                                    console.warn('假日資料無法存至瀏覽器快取:', error);
+                                }
+                            }
+                        }
+                        // 未公告年份：保留現有資料與週末顏色，不猜測平日補假。
+                    } catch (error) {
+                        console.warn('官方假日資料同步失敗，維持現有標示:', error);
+                    } finally {
+                        fetching = false;
+                        try { localStorage.setItem(checkedKey, String(Date.now())); } catch (e) {}
+                    }
+                };
+
+                updateYear();
+                // 頁面長時間開啟、官方年度資料更新時，也會定期檢查。
+                const interval = setInterval(updateYear, HOLIDAY_CHECK_INTERVAL_MS);
+                const checkWhenVisible = () => {
+                    if (document.visibilityState === 'visible') updateYear();
+                };
+                document.addEventListener('visibilitychange', checkWhenVisible);
+                return () => {
+                    cancelled = true;
+                    clearInterval(interval);
+                    document.removeEventListener('visibilitychange', checkWhenVisible);
+                };
+            }, [selectedHolidayYear]);
+
             const [bookings, setBookings] = useState([]); // 全部的預約資料
             const [isLoading, setIsLoading] = useState(false); // 送出表單中的讀取狀態
             const [isSyncing, setIsSyncing] = useState(false); // 與後端同步中的狀態
@@ -375,6 +518,27 @@
 				syncYear: new Date().getFullYear().toString(), // 預設當年
 				syncProjectId: '' // 案名ID
             });
+
+            // RC5：日／月空白區點擊後的快速預約彈窗（獨立草稿，不覆蓋側欄表單）
+            const [quickBooking, setQuickBooking] = useState(null);
+            const submissionGuardRef = useRef(false);
+
+            // 在快速預約視窗開啟時可按 Esc 關閉；送出中禁止關閉及重複送出。
+            useEffect(() => {
+                if (!quickBooking) return;
+                const previousOverflow = document.body.style.overflow;
+                document.body.style.overflow = 'hidden';
+                const onEscape = (event) => {
+                    if (event.key === 'Escape' && !submissionGuardRef.current) {
+                        setQuickBooking(null);
+                    }
+                };
+                document.addEventListener('keydown', onEscape);
+                return () => {
+                    document.removeEventListener('keydown', onEscape);
+                    document.body.style.overflow = previousOverflow;
+                };
+            }, [Boolean(quickBooking)]);
 
             // --- 資源顯示/隱藏處理 ---
             const isResourceHidden = useCallback(
@@ -1115,13 +1279,16 @@
             };
 
             // 送出新預約：前端快速檢核 + GAS addBatch 原子交易
-            const handleSubmit = async (e) => {
+            const handleSubmit = async (e, fromQuickModal = false) => {
                 e.preventDefault();
+                if (submissionGuardRef.current) return;
+                const submittedForm = fromQuickModal ? quickBooking : formData;
+                if (!submittedForm) return;
                 if (!currentScriptUrl) return showNotification("尚未設定此項目的 GAS 網址", "error");
-                if (!formData.resourceId) return showNotification("目前沒有可預約的資源", "error");
-                if (isResourceHidden(formData.resourceId)) return showNotification("此資源目前暫停預約，請重新選擇其他資源", "error");
+                if (!submittedForm.resourceId) return showNotification("目前沒有可預約的資源", "error");
+                if (isResourceHidden(submittedForm.resourceId)) return showNotification("此資源目前暫停預約，請重新選擇其他資源", "error");
 
-                const { title, user, repeatType, repeatCount, date, startTime, endTime, syncCalendar } = formData;
+                const { title, user, repeatType, repeatCount, date, startTime, endTime, syncCalendar } = submittedForm;
                 const trimmedTitle = title.trim();
                 const trimmedUser = user.trim();
                 if (!trimmedTitle || !trimmedUser) return showNotification("請填寫主題與預約者", "error");
@@ -1142,14 +1309,14 @@
                 for (let i = 0; i < bookingDates.length; i++) {
                     const d = bookingDates[i];
                     const tempBooking = {
-                        ...formData,
+                        ...submittedForm,
                         date: d,
                         title: trimmedTitle,
                         user: trimmedUser,
                         syncCalendar: syncCalendar === true,
-                        syncProjectId: syncCalendar === true ? formData.syncProjectId : '',
-                        syncYear: syncCalendar === true ? formData.syncYear : '',
-                        roomId: formData.resourceId,
+                        syncProjectId: syncCalendar === true ? submittedForm.syncProjectId : '',
+                        syncYear: syncCalendar === true ? submittedForm.syncYear : '',
+                        roomId: submittedForm.resourceId,
                         id: `${operationSeed}-${i}`
                     };
                     const conflict = checkConflict(tempBooking);
@@ -1159,6 +1326,7 @@
                     newBookingsToSubmit.push(tempBooking);
                 }
 
+                submissionGuardRef.current = true;
                 setIsLoading(true);
                 try {
                     const result = await sendBookingOperation({ action: 'addBatch', bookings: newBookingsToSubmit });
@@ -1170,7 +1338,11 @@
                     await retryBookingSync(data =>
                         newBookingsToSubmit.every(item => data.some(b => String(b.id) === String(item.id)))
                     );
-                    setFormData(prev => ({ ...prev, title: '', user: '', repeatType: 'none', repeatCount: 1 }));
+                    if (fromQuickModal) {
+                        setQuickBooking(null);
+                    } else {
+                        setFormData(prev => ({ ...prev, title: '', user: '', repeatType: 'none', repeatCount: 1 }));
+                    }
                     if (result.calendarWarnings && result.calendarWarnings.length > 0) {
                         showNotification(`預約成功，共 ${result.count || newBookingsToSubmit.length} 筆；但部分 Google 日曆同步失敗`, 'error');
                     } else {
@@ -1180,6 +1352,7 @@
                     console.error(error);
                     showNotification('連線失敗，請稍後再試', 'error');
                 } finally {
+                    submissionGuardRef.current = false;
                     setIsLoading(false);
                 }
             };
@@ -1321,6 +1494,59 @@
                 return bookings.filter(b => b.date === selectedDate).sort((a, b) => a.startTime.localeCompare(b.startTime));
             }, [bookings, selectedDate]);
 
+            // 開啟 Google 日曆式快速新增：日視圖預填點選資源；月視圖預填點選日期。
+            const openQuickBooking = (date, resourceId = null) => {
+                if (isLoading || editingBooking) return;
+                if (!date) return;
+                if (resourceId && isResourceHidden(resourceId)) {
+                    showNotification('此資源目前暫停預約，請選擇其他資源', 'error');
+                    return;
+                }
+                const available = getDisplayResources(activeCategory);
+                const preferredId = resourceId || formData.resourceId;
+                const selected = available.find(res => res.id === preferredId) || (!resourceId ? available[0] : null);
+                if (!selected) {
+                    showNotification('此分類目前無可預約的資源', 'error');
+                    return;
+                }
+                setQuickBooking({
+                    ...formData,
+                    resourceId: selected.id,
+                    date,
+                    title: '',
+                    user: '',
+                    repeatType: 'none',
+                    repeatCount: 1,
+                    syncCalendar: false,
+                    syncProjectId: ''
+                });
+            };
+
+            const updateQuickBooking = (patch) => {
+                setQuickBooking(prev => prev ? { ...prev, ...patch } : null);
+            };
+
+            const handleQuickStartTimeChange = (newStartTime) => {
+                setQuickBooking(prev => {
+                    if (!prev) return null;
+                    const startIdx = TIME_OPTIONS.indexOf(newStartTime);
+                    const endIdx = TIME_OPTIONS.indexOf(prev.endTime);
+                    const newEndTime = startIdx >= endIdx
+                        ? (TIME_OPTIONS[startIdx + 2] || TIME_OPTIONS[startIdx + 1] || prev.endTime)
+                        : prev.endTime;
+                    return { ...prev, startTime: newStartTime, endTime: newEndTime };
+                });
+            };
+
+            const handleQuickEndTimeChange = (newEndTime) => {
+                if (!quickBooking) return;
+                if (newEndTime <= quickBooking.startTime) {
+                    showNotification('結束時間必須晚於開始時間', 'error');
+                    return;
+                }
+                updateQuickBooking({ endTime: newEndTime });
+            };
+
             // 渲染月曆核心組件
             const renderMonthCalendar = () => {
                 const baseDate = new Date(selectedDate);
@@ -1348,6 +1574,13 @@
                         {days.map((item, i) => {
                             const isToday = item.dateStr === formatDate(new Date());
                             const isSelected = item.dateStr === selectedDate;
+                            const isWeekend = !!item.dateStr && (new Date(year, month, item.day).getDay() % 6 === 0);
+                            const holidayName = item.dateStr
+                                ? (officialHolidayYears[year]
+                                    ? (officialHolidayYears[year][item.dateStr] || '')
+                                    : (TW_OFFICIAL_WEEKDAY_HOLIDAYS[item.dateStr] || ''))
+                                : '';
+                            const isDayOff = isWeekend || !!holidayName;
                             const dayBookings = item.dateStr
                                 ? bookings
                                     .filter(b => b.date === item.dateStr)
@@ -1358,16 +1591,27 @@
                                 <div 
                                     key={i} 
                                     onClick={() => {
-                                        if (item.dateStr) {
-                                            setSelectedDate(item.dateStr);
-                                            setViewMode('daily');
+                                        if (item.dateStr) openQuickBooking(item.dateStr);
+                                    }}
+                                    onKeyDown={(e) => {
+                                        if (item.dateStr && (e.key === 'Enter' || e.key === ' ')) {
+                                            e.preventDefault();
+                                            if (e.target === e.currentTarget) openQuickBooking(item.dateStr);
                                         }
                                     }}
-                                    className={`bg-white min-h-[100px] md:min-h-[120px] p-2 border-t border-r border-slate-100 relative transition-all cursor-pointer hover:bg-blue-50 group flex flex-col ${!item.day ? 'bg-slate-50/50' : ''}`}
+                                    role={item.dateStr ? 'button' : undefined}
+                                    tabIndex={item.dateStr ? 0 : -1}
+                                    aria-label={item.dateStr ? `${item.dateStr}${holidayName ? `，${holidayName}` : isWeekend ? '，週末' : ''}，點擊空白處新增預約` : undefined}
+                                    title={holidayName || (isWeekend ? '週末放假' : undefined)}
+                                    className={`min-h-[100px] md:min-h-[120px] p-2 border-t border-r border-slate-100 relative transition-colors group flex flex-col ${!item.day ? 'bg-slate-50/50 cursor-default' : isDayOff ? 'bg-rose-50 hover:bg-rose-100 cursor-pointer' : 'bg-white hover:bg-blue-50 cursor-pointer'}`}
                                 >
                                     {item.day && (
                                         <>
-                                            <span className={`text-xs font-bold w-7 h-7 flex items-center justify-center rounded-full shrink-0 transition-colors ${isToday ? 'bg-blue-600 text-white shadow-md' : 'text-slate-500 group-hover:text-blue-600'} ${isSelected ? 'ring-2 ring-blue-400 ring-offset-1' : ''}`}>
+                                            <span onClick={(e) => {
+                                                e.stopPropagation();
+                                                setSelectedDate(item.dateStr);
+                                                setViewMode('daily');
+                                            }} title="查看當日預約" className={`text-xs font-bold w-7 h-7 flex items-center justify-center rounded-full shrink-0 transition-colors ${isToday ? 'bg-blue-600 text-white shadow-md' : isDayOff ? 'text-rose-600 group-hover:text-rose-700' : 'text-slate-500 group-hover:text-blue-600'} ${isSelected ? 'ring-2 ring-blue-400 ring-offset-1' : ''}`}>
                                                 {item.day}
                                             </span>
                                             <div className="flex-1 w-full overflow-y-auto no-scrollbar space-y-1 mt-2">
@@ -1387,14 +1631,22 @@
 														}
 													}
                                                     return (
-                                                        <div key={b.id} className={`text-[10px] leading-tight px-1.5 py-1 rounded shadow-sm border truncate flex items-center gap-1 ${res ? res.color : 'bg-slate-100'}`}>
+                                                        <div key={b.id} onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setSelectedDate(item.dateStr);
+                                                            setViewMode('daily');
+                                                        }} title="查看當日預約" className={`text-[10px] leading-tight px-1.5 py-1 rounded shadow-sm border truncate flex items-center gap-1 ${res ? res.color : 'bg-slate-100'}`}>
                                                             <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${res?.dot || 'bg-slate-400'}`}></div>
                                                             <span className="font-bold">{shortName}</span> {b.startTime}-{b.endTime}
                                                         </div>
                                                     );
                                                 })}
                                                 {dayBookings.length > 4 && (
-                                                    <div className="text-[9px] text-slate-400 text-center font-bold">+ {dayBookings.length - 4} 更多</div>
+                                                    <div onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        setSelectedDate(item.dateStr);
+                                                        setViewMode('daily');
+                                                    }} className="text-[9px] text-slate-400 text-center font-bold">+ {dayBookings.length - 4} 更多</div>
                                                 )}
                                             </div>
                                         </>
@@ -1763,7 +2015,18 @@
                                                 // 保護屬性讀取避免當機
                                                 const currentStatus = (resourceStatuses || {})[res.id]; 
                                                 return (
-                                                    <div key={res.id} className={`bg-slate-50/50 rounded-2xl p-5 border flex flex-col h-full ${isAdmin && isResourceHidden(res.id) ? 'border-slate-300 opacity-70' : 'border-slate-100'}`}>
+                                                    <div key={res.id}
+                                                         onClick={() => openQuickBooking(selectedDate, res.id)}
+                                                         onKeyDown={(e) => {
+                                                             if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+                                                                 e.preventDefault();
+                                                                 openQuickBooking(selectedDate, res.id);
+                                                             }
+                                                         }}
+                                                         role="button"
+                                                         tabIndex={0}
+                                                         aria-label={`${res.name}，點擊空白處新增預約`}
+                                                         className={`bg-slate-50/50 rounded-2xl p-5 border flex flex-col h-full cursor-pointer hover:border-blue-200 transition-colors ${isAdmin && isResourceHidden(res.id) ? 'border-slate-300 opacity-70' : 'border-slate-100'}`}>
                                                         <div className="flex items-center justify-between mb-4 gap-3">
                                                             <h3 className={`text-[11px] font-black px-3 py-1 rounded-full border shadow-sm ${res.color}`}>{res.name}</h3>
                                                             <div className="flex items-center gap-2 shrink-0">
@@ -1771,7 +2034,7 @@
                                                                     <span className="text-[10px] font-bold text-slate-400">{resBookings.length} 筆預約</span>
                                                                 ) : (
                                                                     <button
-                                                                        onClick={() => toggleResourceStatus(res.id)}
+                                                                        onClick={(e) => { e.stopPropagation(); toggleResourceStatus(res.id); }}
                                                                         disabled={!currentStatus}
                                                                         className={`text-[10px] font-black px-2.5 py-1 rounded-md border transition-all ${
                                                                             !currentStatus
@@ -1787,7 +2050,7 @@
                                                                 {isAdmin && (
                                                                     <button
                                                                         type="button"
-                                                                        onClick={() => toggleResourceVisibility(res.id)}
+                                                                        onClick={(e) => { e.stopPropagation(); toggleResourceVisibility(res.id); }}
                                                                         title={isResourceHidden(res.id) ? "恢復一般使用者顯示" : "隱藏此資源"}
                                                                         aria-label={isResourceHidden(res.id) ? "恢復一般使用者顯示" : "隱藏此資源"}
                                                                         className={`p-1.5 rounded-lg border transition-all ${
@@ -1809,7 +2072,7 @@
                                                         ) : (
                                                             <div className="space-y-3">
                                                                 {resBookings.map(b => (
-                                                                    <div key={b.id} className="group relative bg-white p-4 rounded-xl border border-slate-100 shadow-sm hover:shadow-md hover:border-blue-200 transition-all">
+                                                                    <div key={b.id} onClick={e => e.stopPropagation()} className="group relative bg-white p-4 rounded-xl border border-slate-100 shadow-sm hover:shadow-md hover:border-blue-200 transition-all">
                                                                         <div className="flex items-center gap-3 mb-2">
                                                                             <span className="text-[11px] font-black text-blue-600 bg-blue-50 px-2 py-0.5 rounded border border-blue-100">{b.startTime} - {b.endTime}</span>
                                                                         </div>
@@ -1880,6 +2143,131 @@
                             </div>
                         </div>
                     </footer>
+
+                    {/* --- RC5：日／月檢視點擊空白處的快速預約彈出視窗 --- */}
+                    {quickBooking && (
+                        <div
+                            className="fixed inset-0 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center z-[90] p-4 overflow-y-auto"
+                            onMouseDown={(e) => {
+                                if (e.target === e.currentTarget && !isLoading) setQuickBooking(null);
+                            }}
+                        >
+                            <div role="dialog" aria-modal="true" aria-labelledby="quick-booking-title"
+                                 className="bg-white rounded-3xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto border border-slate-200">
+                                <div className="px-6 py-5 flex items-center justify-between border-b border-slate-100">
+                                    <div>
+                                        <h3 id="quick-booking-title" className="font-black text-slate-800 text-lg">新增預約登記</h3>
+                                        <p className="text-[11px] text-slate-400 mt-1">{CATEGORIES.find(c => c.id === activeCategory)?.label} · {quickBooking.date}</p>
+                                    </div>
+                                    <button type="button" disabled={isLoading} onClick={() => setQuickBooking(null)} aria-label="關閉預約視窗"
+                                            className="p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700 rounded-xl disabled:opacity-50">
+                                        <Icon name="x" size={20} />
+                                    </button>
+                                </div>
+                                <form onSubmit={(e) => handleSubmit(e, true)} className="p-6 space-y-4">
+                                    <div className="space-y-1.5">
+                                        <label className="text-[11px] font-black text-slate-400 ml-1">預約項目</label>
+                                        <select value={quickBooking.resourceId} onChange={e => updateQuickBooking({ resourceId: e.target.value })}
+                                                className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                                            {getDisplayResources(activeCategory).map(res => <option key={res.id} value={res.id}>{res.name}</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <label className="text-[11px] font-black text-slate-400 ml-1">預約日期</label>
+                                        <input type="date" required value={quickBooking.date} onChange={e => updateQuickBooking({ date: e.target.value })}
+                                               className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500" />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div className="space-y-1.5">
+                                            <label className="text-[11px] font-black text-slate-400 ml-1">開始時間</label>
+                                            <select value={quickBooking.startTime} onChange={e => handleQuickStartTimeChange(e.target.value)}
+                                                    className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                                                {TIME_OPTIONS.slice(0, -1).map(t => <option key={t} value={t}>{t}</option>)}
+                                            </select>
+                                        </div>
+                                        <div className="space-y-1.5">
+                                            <label className="text-[11px] font-black text-slate-400 ml-1">結束時間</label>
+                                            <select value={quickBooking.endTime} onChange={e => handleQuickEndTimeChange(e.target.value)}
+                                                    className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                                                {TIME_OPTIONS.slice(1).map(t => <option key={t} value={t}>{t}</option>)}
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div className="p-3 rounded-2xl border border-blue-100 bg-blue-50/50 space-y-2">
+                                        <label className="text-[11px] font-black text-blue-600 flex items-center gap-1.5"><Icon name="refresh" size={12} /> 重複預約週期</label>
+                                        <select value={quickBooking.repeatType} onChange={e => updateQuickBooking({ repeatType: e.target.value })}
+                                                className="w-full rounded-xl border border-blue-200 p-2.5 bg-white text-sm font-bold text-blue-700 outline-none">
+                                            <option value="none">一次性預約</option>
+                                            <option value="daily">每天重複</option>
+                                            <option value="weekly">每週重複</option>
+                                            <option value="monthly">每月重複</option>
+                                        </select>
+                                        {quickBooking.repeatType !== 'none' && (
+                                            <div className="space-y-2">
+                                                <label className="text-[11px] font-black text-blue-500 flex justify-between">
+                                                    <span>重複次數</span><span>{quickBooking.repeatCount} 次</span>
+                                                </label>
+                                                <input type="range" min="1" max="12" value={quickBooking.repeatCount}
+                                                       onChange={e => updateQuickBooking({ repeatCount: parseInt(e.target.value, 10) })}
+                                                       className="w-full h-1.5 bg-blue-200 rounded-lg appearance-none cursor-pointer" />
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="p-3 rounded-2xl border border-emerald-100 bg-emerald-50/50 space-y-3">
+                                        <div className="flex items-center justify-between">
+                                            <label className="text-[11px] font-black text-emerald-600 flex items-center gap-1.5"><Icon name="calendar" size={12} /> 同步至Google日曆</label>
+                                            <button type="button" aria-label="同步至Google日曆" aria-pressed={quickBooking.syncCalendar}
+                                                    onClick={() => updateQuickBooking({ syncCalendar: !quickBooking.syncCalendar })}
+                                                    className={`w-10 h-5 flex items-center rounded-full p-1 transition-colors ${quickBooking.syncCalendar ? 'bg-emerald-600' : 'bg-slate-300'}`}>
+                                                <div className={`bg-white w-3 h-3 rounded-full shadow-md transform transition-transform ${quickBooking.syncCalendar ? 'translate-x-5' : 'translate-x-0'}`}></div>
+                                            </button>
+                                        </div>
+                                        {quickBooking.syncCalendar && (
+                                            <div className="space-y-3">
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] font-bold text-emerald-500 ml-1">選擇案號年份</label>
+                                                    <select value={quickBooking.syncYear}
+                                                            onChange={e => updateQuickBooking({ syncYear: e.target.value, syncProjectId: '' })}
+                                                            className="w-full rounded-xl border border-emerald-200 p-2 bg-white text-xs font-bold text-slate-700">
+                                                        {YEARS.map(y => <option key={y} value={y}>{y} 年</option>)}
+                                                        <option value="Others">其他 (Others)</option>
+                                                    </select>
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] font-bold text-emerald-500 ml-1">案號 + 案名</label>
+                                                    <select value={quickBooking.syncProjectId}
+                                                            onChange={e => updateQuickBooking({ syncProjectId: e.target.value })}
+                                                            className="w-full rounded-xl border border-emerald-200 p-2 bg-white text-xs font-bold text-slate-700">
+                                                        <option value="">-- 請選擇專案 --</option>
+                                                        {(PROJECTS_DATA[quickBooking.syncYear] || []).map(p => <option key={p.id} value={p.id}>{p.id} {p.name}</option>)}
+                                                    </select>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <label className="text-[11px] font-black text-slate-400 ml-1">預約事由</label>
+                                        <input type="text" required autoFocus value={quickBooking.title} onChange={e => updateQuickBooking({ title: e.target.value })}
+                                               placeholder="例：專案進度檢討會" className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500" />
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <label className="text-[11px] font-black text-slate-400 ml-1">預約人資訊</label>
+                                        <input type="text" required value={quickBooking.user} onChange={e => updateQuickBooking({ user: e.target.value })}
+                                               placeholder="姓名 + 分機" className="w-full rounded-xl border border-slate-200 p-3 bg-slate-50 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500" />
+                                    </div>
+                                    <div className="flex gap-3 pt-2">
+                                        <button type="button" onClick={() => setQuickBooking(null)} disabled={isLoading}
+                                                className="flex-1 border border-slate-200 text-slate-600 font-black py-3 rounded-xl hover:bg-slate-50 disabled:opacity-50">取消</button>
+                                        <button type="submit" disabled={isLoading || !quickBooking.resourceId || isResourceHidden(quickBooking.resourceId)}
+                                                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl shadow-lg shadow-blue-100 disabled:opacity-50 flex items-center justify-center gap-2">
+                                            {isLoading ? <Icon name="loader-2" size={18} /> : <Icon name="calendar" size={18} />}
+                                            {isLoading ? '預約處理中...' : '確認預約'}
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
 
                     {/* --- 管理者編輯彈出視窗 (Edit Modal) --- */}
                     {editingBooking && (
